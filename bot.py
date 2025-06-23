@@ -19,6 +19,11 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramBadRequest
 from dotenv import load_dotenv
 
+# ДОБАВЛЕНО для Webhooks с aiohttp
+from aiohttp import web
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+
+
 # 📝 Configuración del registro (logging)
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler()], force=True)
 logger = logging.getLogger(__name__)
@@ -61,12 +66,12 @@ else:
 
 RENDER_EXTERNAL_HOSTNAME = os.getenv('RENDER_EXTERNAL_HOSTNAME')
 
+# Изменено: Если RENDER_EXTERNAL_HOSTNAME не задан, мы не можем создать URL вебхука
 if not RENDER_EXTERNAL_HOSTNAME:
-    logger.error("❌ ERROR: La variable de entorno RENDER_EXTERNAL_HOSTNAME no está configurada.")
-    WEBHOOK_URL = None # Или fallback на localhost, но для прода нужно Render
+    logger.error("❌ ERROR: La variable de entorno RENDER_EXTERNAL_HOSTNAME no está configurada. Necesaria para WEBHOOK_URL.")
     exit(1)
 else:
-    WEBHOOK_URL = f"https://{RENDER_EXTERNAL_HOSTNAME}/webhook/{API_TOKEN}"
+    WEBHOOK_URL = f"https://{RENDER_EXTERNAL_HOSTNAME}/webhook/{API_TOKEN}" # Путь для вебхука
 
 
 # 🤖 Inicialización del bot y dispatcher
@@ -1091,54 +1096,62 @@ async def handle_unprocessed(message: Message, state: FSMContext):
         await message.answer(f"❗ Acción no reconocida. Por favor, continúe con el proceso actual o use /cancel para reiniciar.")
 
 
-# --- ДОБАВЛЕНО ДЛЯ ВЕБХУКОВ ---
-async def on_startup(bot: Bot):
-    logger.info("🚀 Bot is starting with webhooks...")
+# --- ДОБАВЛЕНО/ИЗМЕНЕНО ДЛЯ ВЕБХУКОВ С AIOHTTP ---
+async def on_startup_webhook(dispatcher: Dispatcher, bot: Bot):
+    logger.info("🚀 Bot is starting with webhooks (aiohttp)...")
     print(f"WEBHOOK_URL: {WEBHOOK_URL}")
     print(f"WEBAPP_HOST: {WEBAPP_HOST}")
     print(f"WEBAPP_PORT: {WEBAPP_PORT}")
-    # Установка вебхука при старте
-    await bot.set_webhook(WEBHOOK_URL)
+    # Удаляем старый вебхук на всякий случай
+    await bot.delete_webhook(drop_pending_updates=True)
+    # Установка нового вебхука
+    await bot.set_webhook(WEBHOOK_URL, secret_token=API_TOKEN) # Используем BOT_TOKEN как secret_token
     logger.info("✅ Webhook set successfully.")
-    # Оповещение администратора (опционально)
     if ADMIN_ID:
         try:
             await bot.send_message(ADMIN_ID, "✅ Бот успешно запущен и готов к работе!")
         except Exception as e:
             logger.error(f"❌ Не удалось отправить сообщение администратору о запуске: {e}")
 
-async def on_shutdown(bot: Bot):
+async def on_shutdown_webhook(dispatcher: Dispatcher, bot: Bot):
     logger.info("🔴 Bot is shutting down, deleting webhook...")
     await bot.delete_webhook()
     logger.info("🗑️ Webhook deleted.")
-    # Оповещение администратора (опционально)
     if ADMIN_ID:
         try:
             await bot.send_message(ADMIN_ID, "🔴 Бот остановлен.")
         except Exception as e:
             logger.error(f"❌ Не удалось отправить сообщение администратору об остановке: {e}")
-# --- КОНЕЦ ДОБАВЛЕННОГО ---
 
 
-async def main():
+# Функция main теперь не асинхронная, так как web.run_app() блокирующая
+def main():
     logger.info("🚀 Iniciando la función principal...")
-    # Загружаем данные при старте
-    await load_user_data()
-    await load_listings()
+    # Загружаем данные при старте (нужно сделать их синхронными или вызвать asyncio.run внутри)
+    # Так как load_user_data и load_listings асинхронные, их нужно выполнить до запуска веб-сервера
+    asyncio.run(load_user_data())
+    asyncio.run(load_listings())
 
-    logger.info(f"🚀 Бот запускается в режиме вебхуков на {WEBAPP_HOST}:{WEBAPP_PORT}")
-    await dp.start_webhook(
+    # Создаем веб-приложение aiohttp
+    app = web.Application()
+
+    # Регистрируем обработчик вебхуков
+    webhook_requests_handler = SimpleRequestHandler(
+        dispatcher=dp,
         bot=bot,
-        webhook_url=WEBHOOK_URL,
-        on_startup=on_startup,
-        on_shutdown=on_shutdown,
-        allowed_updates=dp.resolve_used_update_types(),
-        host=WEBAPP_HOST,
-        port=WEBAPP_PORT,
-        secret_token=API_TOKEN # Используем BOT_TOKEN как secret_token (Telegram использует его для подписи)
+        secret_token=API_TOKEN # Используем BOT_TOKEN как secret_token
     )
+    # Путь для вебхука должен быть уникальным и содержать токен для безопасности
+    webhook_requests_handler.register(app, path=f"/webhook/{API_TOKEN}")
+
+    # Устанавливаем функции on_startup и on_shutdown для aiohttp приложения
+    app.on_startup.append(lambda app: on_startup_webhook(dp, bot))
+    app.on_shutdown.append(lambda app: on_shutdown_webhook(dp, bot))
+
+    # Запускаем веб-приложение
+    logger.info(f"🚀 Запускаем веб-сервер на {WEBAPP_HOST}:{WEBAPP_PORT}")
+    web.run_app(app, host=WEBAPP_HOST, port=WEBAPP_PORT)
+
 
 if __name__ == '__main__':
-    # Эта часть будет вызываться только при прямом запуске файла
-    # Для Render, procfile будет запускать 'python bot.py'
-    asyncio.run(main())
+    main() # main() теперь синхронная
