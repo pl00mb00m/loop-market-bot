@@ -23,6 +23,8 @@ from dotenv import load_dotenv
 from aiohttp import web
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
+# ДОБАВЛЕНО для генерации secret_token
+import secrets # <-- ЭТА СТРОКА ДОБАВЛЕНА
 
 # 📝 Configuración del registro (logging)
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler()], force=True)
@@ -71,8 +73,10 @@ if not RENDER_EXTERNAL_HOSTNAME:
     logger.error("❌ ERROR: La variable de entorno RENDER_EXTERNAL_HOSTNAME no está configurada. Necesaria para WEBHOOK_URL.")
     exit(1)
 else:
-    WEBHOOK_URL = f"https://{RENDER_EXTERNAL_HOSTNAME}/webhook/{API_TOKEN}" # Путь для вебхука
-
+    # Генерируем секретный токен для вебхука
+    WEBHOOK_SECRET = secrets.token_urlsafe(32) # <-- ЭТА СТРОКА ДОБАВЛЕНА
+    WEBHOOK_URL = f"https://{RENDER_EXTERNAL_HOSTNAME}/webhook/{WEBHOOK_SECRET}" # <-- ЭТА СТРОКА ИЗМЕНЕНА
+    # Важно: WEBHOOK_PATH = /webhook/{WEBHOOK_SECRET}
 
 # 🤖 Inicialización del bot y dispatcher
 default_props = DefaultBotProperties(parse_mode=ParseMode.HTML)
@@ -81,7 +85,7 @@ storage = MemoryStorage() # Используем MemoryStorage, для боль�
 dp = Dispatcher(storage=storage)
 
 
-# 📝 Diccionarios para almacenar datos (persistentes entre reinicios si se guarda/carga)
+# 📝 Diccionarios para almacenar данные (persistentes entre reinicios si se guarda/carga)
 user_data_file = 'user_data.json'
 listings_file = 'listings.json'
 users_data = {}
@@ -1105,7 +1109,7 @@ async def on_startup_webhook(dispatcher: Dispatcher, bot: Bot):
     # Удаляем старый вебхук на всякий случай
     await bot.delete_webhook(drop_pending_updates=True)
     # Установка нового вебхука
-    await bot.set_webhook(WEBHOOK_URL, secret_token=API_TOKEN) # Используем BOT_TOKEN как secret_token
+    await bot.set_webhook(WEBHOOK_URL, secret_token=WEBHOOK_SECRET) # <-- ЭТА СТРОКА ИЗМЕНЕНА
     logger.info("✅ Webhook set successfully.")
     if ADMIN_ID:
         try:
@@ -1139,10 +1143,10 @@ def main():
     webhook_requests_handler = SimpleRequestHandler(
         dispatcher=dp,
         bot=bot,
-        secret_token=API_TOKEN # Используем BOT_TOKEN как secret_token
+        secret_token=WEBHOOK_SECRET # <-- ЭТА СТРОКА ИЗМЕНЕНА
     )
     # Путь для вебхука должен быть уникальным и содержать токен для безопасности
-    webhook_requests_handler.register(app, path=f"/webhook/{API_TOKEN}")
+    webhook_requests_handler.register(app, path=f"/webhook/{WEBHOOK_SECRET}") # <-- ЭТА СТРОКА ИЗМЕНЕНА
 
     # Устанавливаем функции on_startup и on_shutdown для aiohttp приложения
     app.on_startup.append(lambda app: on_startup_webhook(dp, bot))
