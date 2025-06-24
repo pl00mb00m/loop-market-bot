@@ -22,4 +22,4 @@ listings.json
 
 # IDE
 .idea/
-.vscode/
+.vscode/.env
