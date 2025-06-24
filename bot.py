@@ -1,4 +1,3 @@
-print("🚀 Iniciando el bot...")
 import asyncio
 import json
 import datetime
@@ -19,1143 +18,1483 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramBadRequest
 from dotenv import load_dotenv
 
-# ДОБАВЛЕНО для Webhooks с aiohttp
-from aiohttp import web
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-
-# ДОБАВЛЕНО для генерации secret_token
-import secrets # <-- ЭТА СТРОКА ДОБАВЛЕНА
-
-# 📝 Configuración del registro (logging)
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler()], force=True)
+# 📝 Logging configuration
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler()])
 logger = logging.getLogger(__name__)
 
-# 🔧 Cargar variables de entorno
+# 🔧 Load environment variables
 load_dotenv()
-print("🔍 Verificando variables de entorno...")
 API_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
-print(f"BOT_TOKEN: {'✅ configurado' if API_TOKEN else '❌ no configurado'}")
-print(f"ADMIN_ID: {'✅ configurado' if ADMIN_ID else '❌ no configurado'}")
 
-# ✅ Verificación de variables de entorno
 if not API_TOKEN:
-    logger.error("❌ ERROR: El token del bot (BOT_TOKEN) no está configurado en las variables de entorno.")
+    logger.error("❌ BOT_TOKEN not set in environment variables.")
     exit(1)
 if not ADMIN_ID:
-    logger.warning("⚠️ ADVERTENCIA: El ID del administrador (ADMIN_ID) no está configurado.")
-    ADMIN_ID = None # Asegurarse de que es None si no está configurado
-else:
-    try:
-        ADMIN_ID = int(ADMIN_ID)
-    except ValueError:
-        logger.error("❌ ERROR: ADMIN_ID debe ser un número entero.")
-        exit(1)
-
-# 🌐 Configuración del Webhook para Render
-WEBAPP_HOST = '0.0.0.0' # Для Render, слушать на всех интерфейсах
-WEBAPP_PORT = os.getenv('PORT') # Render предоставляет порт через ENV
-
-if not WEBAPP_PORT:
-    logger.error("❌ ERROR: La variable de entorno PORT no está configurada por Render.")
+    logger.error("❌ ADMIN_ID not set in environment variables.")
     exit(1)
-else:
-    try:
-        WEBAPP_PORT = int(WEBAPP_PORT)
-    except ValueError:
-        logger.error("❌ ERROR: PORT debe ser un número entero.")
-        exit(1)
-
-RENDER_EXTERNAL_HOSTNAME = os.getenv('RENDER_EXTERNAL_HOSTNAME')
-
-# Изменено: Если RENDER_EXTERNAL_HOSTNAME не задан, мы не можем создать URL вебхука
-if not RENDER_EXTERNAL_HOSTNAME:
-    logger.error("❌ ERROR: La variable de entorno RENDER_EXTERNAL_HOSTNAME no está configurada. Necesaria para WEBHOOK_URL.")
+try:
+    ADMIN_ID = int(ADMIN_ID)
+except ValueError:
+    logger.error("❌ ADMIN_ID is not a valid integer.")
     exit(1)
-else:
-    # Генерируем секретный токен для вебхука
-    WEBHOOK_SECRET = secrets.token_urlsafe(32) # <-- ЭТА СТРОКА ДОБАВЛЕНА
-    WEBHOOK_URL = f"https://{RENDER_EXTERNAL_HOSTNAME}/webhook/{WEBHOOK_SECRET}" # <-- ЭТА СТРОКА ИЗМЕНЕНА
-    # Важно: WEBHOOK_PATH = /webhook/{WEBHOOK_SECRET}
 
-# 🤖 Inicialización del bot y dispatcher
-default_props = DefaultBotProperties(parse_mode=ParseMode.HTML)
-bot = Bot(token=API_TOKEN, default=default_props)
-storage = MemoryStorage() # Используем MemoryStorage, для больших ботов можно рассмотреть Redis
-dp = Dispatcher(storage=storage)
+# 🤖 Bot and Dispatcher initialization
+bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+dp = Dispatcher(storage=MemoryStorage())
 
-
-# 📝 Diccionarios para almacenar данные (persistentes entre reinicios si se guarda/carga)
-user_data_file = 'user_data.json'
-listings_file = 'listings.json'
-users_data = {}
+# 📊 Global data structures
+user_data = {}
 listings = {}
+categories = [
+    "📦 ¡Kit de mudanza!", "🛋️ Muebles", "📱 Electrónica", "👗 Ropa", "👜 Accesorios",
+    "📚 Libros", "🧸 Juguetes", "🔌 Electrodomésticos", "🏀 Deportes", "🌟 Otros"
+]
+cities = [
+    "Quito", "Guayaquil", "Cuenca", "Santo Domingo", "Manta",
+    "Portoviejo", "Ambato", "Riobamba", "Loja", "Ibarra",
+    "Esmeraldas", "Babahoyo", "Latacunga", "Machala", "Quevedo",
+    "Tulcán", "Salinas", "Baños", "Montañita", "Otavalo",
+    "Puyo", "Tena", "Atacames", "San Vicente"
+]
+city_mapping = {city: city for city in cities}
 
-async def load_user_data():
-    global users_data
-    if os.path.exists(user_data_file):
-        with open(user_data_file, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            users_data = {int(k): v for k, v in data.items()}
-            logger.info(f"✅ Datos de usuario cargados desde {user_data_file}")
-    else:
-        users_data = {}
-        logger.info(f"🆕 {user_data_file} no encontrado, iniciando con datos de usuario vacíos.")
-
-async def save_user_data():
-    with open(user_data_file, 'w', encoding='utf-8') as f:
-        json.dump(users_data, f, ensure_ascii=False, indent=4)
-    logger.info(f"💾 Datos de usuario guardados en {user_data_file}")
-
-async def load_listings():
-    global listings
-    if os.path.exists(listings_file):
-        with open(listings_file, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            listings = {k: v for k, v in data.items()}
-            # Convertir las fechas de expiración de nuevo a objetos datetime
-            for listing_id, listing_info in listings.items():
-                if 'expires_at' in listing_info and isinstance(listing_info['expires_at'], str):
-                    try:
-                        listing_info['expires_at'] = datetime.datetime.fromisoformat(listing_info['expires_at'])
-                    except ValueError:
-                        logger.error(f"❌ Error al parsear fecha para {listing_id}: {listing_info['expires_at']}")
-                        listing_info['expires_at'] = None # O manejar el error de otra forma
-            logger.info(f"✅ Anuncios cargados desde {listings_file}")
-    else:
-        listings = {}
-        logger.info(f"🆕 {listings_file} no encontrado, iniciando con anuncios vacíos.")
-
-async def save_listings():
-    with open(listings_file, 'w', encoding='utf-8') as f:
-        # Convertir objetos datetime a strings ISO para JSON
-        json_serializable_listings = {}
-        for listing_id, listing_info in listings.items():
-            serializable_info = listing_info.copy()
-            if 'expires_at' in serializable_info and isinstance(serializable_info['expires_at'], datetime.datetime):
-                serializable_info['expires_at'] = serializable_info['expires_at'].isoformat()
-            json_serializable_listings[listing_id] = serializable_info
-        json.dump(json_serializable_listings, f, ensure_ascii=False, indent=4)
-    logger.info(f"💾 Anuncios guardados en {listings_file}")
-
-
-# 📚 Estados para FSM
-class Form(StatesGroup):
-    title = State()
-    description = State()
-    category = State()
-    price = State()
-    photos = State()
-    location = State()
-    contact = State()
-    terms_agreed = State()
-    confirm_publish = State()
-    edit_field = State()
-    edit_item_id = State()
-    edit_title = State()
-    edit_description = State()
-    edit_category = State()
-    edit_price = State()
-    edit_photos = State()
-    edit_location = State()
-    edit_contact = State()
-    confirm_delete = State()
-    set_duration = State()
-
-
-# ⌨️ Teclados
-main_keyboard = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="➕ Publicar Anuncio"), KeyboardButton(text="🔍 Mis Anuncios")],
-        [KeyboardButton(text="⚙️ Configuración")]
-    ],
-    resize_keyboard=True,
-    input_field_placeholder="Seleccione una opción"
+# ⌨️ Keyboards
+cancel_keyboard = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text="❌ Cancelar")]],
+    resize_keyboard=True
 )
 
-# ... (Остальные клавиатуры остались без изменений) ...
-def get_main_keyboard_admin():
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="➕ Publicar Anuncio"), KeyboardButton(text="🔍 Mis Anuncios")],
-            [KeyboardButton(text="⚙️ Configuración"), KeyboardButton(text="📊 Admin Panel")] # Добавлена кнопка админ-панели
-        ],
-        resize_keyboard=True,
-        input_field_placeholder="Seleccione una opción"
-    )
+main_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="🧳 Dejar objetos"), KeyboardButton(text="🔍 Buscar objeto")],
+        [KeyboardButton(text="📋 Mis anuncios")]
+    ],
+    resize_keyboard=True
+)
 
-
-# ------------------------------ Funciones de ayuda ------------------------------
-def generate_listing_id():
-    """Genera un ID único basado en el timestamp."""
-    return str(int(datetime.datetime.now().timestamp()))
-
-def format_listing_message(listing_id, listing_info, include_contact=False):
-    """Formatea la información del anuncio en un mensaje."""
-    title = escape(listing_info.get('title', 'N/A'))
-    description = escape(listing_info.get('description', 'N/A'))
-    category = escape(listing_info.get('category', 'N/A'))
-    price = listing_info.get('price', 'N/A')
-    location_str = escape(listing_info.get('location_name', 'No especificada'))
-
-    expires_at = listing_info.get('expires_at')
-    expiry_info = ""
-    if expires_at and isinstance(expires_at, datetime.datetime):
-        remaining_time = expires_at - datetime.datetime.now()
-        if remaining_time.total_seconds() > 0:
-            days = remaining_time.days
-            hours = remaining_time.seconds // 3600
-            minutes = (remaining_time.seconds % 3600) // 60
-            if days > 0:
-                expiry_info = f"Vigencia: {days}d {hours}h {minutes}m"
-            else:
-                expiry_info = f"Vigencia: {hours}h {minutes}m"
-        else:
-            expiry_info = "Expirado"
+def get_categories_keyboard(is_search=False):
+    if is_search:
+        counts = count_listings_by_category()
+        keyboard = []
+        row = []
+        row.append(InlineKeyboardButton(text=f"♾ Solo Gratis ({counts.get('Gratis', 0)})", callback_data="search_category_Gratis"))
+        keyboard.append(row)
+        row = []
+        for i, category in enumerate(categories):
+            button_text = f"{category} ({counts.get(category.replace('📦 ', '').replace('🛋️ ', '').replace('📱 ', '').replace('👗 ', '').replace('👜 ', '').replace('📚 ', '').replace('🧸 ', '').replace('🔌 ', '').replace('🏀 ', '').replace('🌟 ', ''), 0)})"
+            row.append(InlineKeyboardButton(text=button_text, callback_data=f"search_category_{category.replace('📦 ', '').replace('🛋️ ', '').replace('📱 ', '').replace('👗 ', '').replace('👜 ', '').replace('📚 ', '').replace('🧸 ', '').replace('🔌 ', '').replace('🏀 ', '').replace('🌟 ', '')}"))
+            if (i + 1) % 2 == 0 or i == len(categories) - 1:
+                keyboard.append(row)
+                row = []
+        keyboard.append([InlineKeyboardButton(text="⏭️ Omitir", callback_data="search_skip_category")])
+        keyboard.append([InlineKeyboardButton(text="❌ Cancelar", callback_data="cancel")])
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
     else:
-        expiry_info = "Vigencia: Indefinido" # Fallback si no hay fecha o es inválida
+        keyboard = [[KeyboardButton(text=category)] for category in categories]
+        keyboard.append([KeyboardButton(text="❌ Cancelar")])
+        return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
-    message_text = (
-        f"<b>Anuncio #{listing_id}</b>\n"
-        f"<b>Título:</b> {title}\n"
-        f"<b>Descripción:</b> {description}\n"
-        f"<b>Categoría:</b> {category}\n"
-        f"<b>Precio:</b> ${price}\n"
-        f"<b>Ubicación:</b> {location_str}\n"
-        f"<i>{expiry_info}</i>"
-    )
-
-    if include_contact:
-        contact = escape(listing_info.get('contact', 'No especificado'))
-        message_text += f"\n<b>Contacto:</b> {contact}"
-    
-    return message_text
-
-async def display_item_card(chat_id, listing_id, caller_is_edit=False, is_admin_view=False):
-    """Muestra la tarjeta del anuncio con sus opciones."""
-    listing = listings.get(listing_id)
-    if not listing:
-        await bot.send_message(chat_id, "❗ Anuncio no encontrado.")
-        return
-
-    photos = listing.get('photos', [])
-    caption = format_listing_message(listing_id, listing, include_contact=True)
-
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
-    
-    # Botones para usuario/administrador
-    if is_admin_view:
-        keyboard.inline_keyboard.append([
-            InlineKeyboardButton(text="📝 Editar", callback_data=f"edit_listing:{listing_id}"),
-            InlineKeyboardButton(text="❌ Eliminar", callback_data=f"delete_listing:{listing_id}")
-        ])
-        keyboard.inline_keyboard.append([
-            InlineKeyboardButton(text="⏳ Establecer vigencia", callback_data=f"set_duration:{listing_id}")
-        ])
-        keyboard.inline_keyboard.append([InlineKeyboardButton(text="⬅️ Volver al Panel Admin", callback_data="back_to_admin_panel")])
-    elif caller_is_edit: # Si el usuario está editando su propio anuncio
-        keyboard.inline_keyboard.append([
-            InlineKeyboardButton(text="📝 Editar", callback_data=f"edit_listing:{listing_id}"),
-            InlineKeyboardButton(text="❌ Eliminar", callback_data=f"delete_listing:{listing_id}")
-        ])
-        keyboard.inline_keyboard.append([
-            InlineKeyboardButton(text="⏳ Establecer vigencia", callback_data=f"set_duration:{listing_id}")
-        ])
-        keyboard.inline_keyboard.append([InlineKeyboardButton(text="⬅️ Mis Anuncios", callback_data="my_listings")])
-
-    else: # Vista pública del anuncio
-        # Si es el propietario del anuncio, mostrar botones de edición
-        if listing.get('user_id') == chat_id:
-             keyboard.inline_keyboard.append([
-                InlineKeyboardButton(text="📝 Editar", callback_data=f"edit_listing:{listing_id}"),
-                InlineKeyboardButton(text="❌ Eliminar", callback_data=f"delete_listing:{listing_id}")
-            ])
-             keyboard.inline_keyboard.append([
-                InlineKeyboardButton(text="⏳ Establecer vigencia", callback_data=f"set_duration:{listing_id}")
-            ])
-        
-        # Botón para ir a la ubicación (si existe)
-        if 'location_latitude' in listing and 'location_longitude' in listing:
-            location_url = f"http://maps.google.com/maps?q={listing['location_latitude']},{listing['location_longitude']}"
-            keyboard.inline_keyboard.append([
-                InlineKeyboardButton(text="📍 Ver en Mapa", url=location_url)
-            ])
-        
-        # Botón de contacto directo
-        if listing.get('contact'):
-            keyboard.inline_keyboard.append([
-                InlineKeyboardButton(text="💬 Contactar", url=f"https://t.me/{listing['contact']}")
-            ])
-        
-        keyboard.inline_keyboard.append([InlineKeyboardButton(text="⬅️ Volver", callback_data="back_to_main")])
-
-
-    if photos:
-        media = []
-        for i, photo_id in enumerate(photos):
-            if i == 0: # Primera foto con caption
-                media.append(InputMediaPhoto(media=photo_id, caption=caption))
-            else: # Resto de fotos sin caption
-                media.append(InputMediaPhoto(media=photo_id))
-        
-        try:
-            await bot.send_media_group(chat_id, media=media)
-            # El teclado se envía con un mensaje separado si hay fotos,
-            # ya que send_media_group no soporta reply_markup directamente.
-            await bot.send_message(chat_id, "Opciones del anuncio:", reply_markup=keyboard)
-        except TelegramBadRequest as e:
-            logger.error(f"❌ Error al enviar grupo de fotos o mensaje: {e}")
-            await bot.send_message(chat_id, caption, reply_markup=keyboard) # Enviar solo texto si falla
-    else:
-        await bot.send_message(chat_id, caption, reply_markup=keyboard)
-
-def get_edit_field_keyboard(listing_id):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📝 Título", callback_data=f"edit_field_type:{listing_id}:title")],
-        [InlineKeyboardButton(text="📝 Descripción", callback_data=f"edit_field_type:{listing_id}:description")],
-        [InlineKeyboardButton(text="📝 Categoría", callback_data=f"edit_field_type:{listing_id}:category")],
-        [InlineKeyboardButton(text="📝 Precio", callback_data=f"edit_field_type:{listing_id}:price")],
-        [InlineKeyboardButton(text="📸 Fotos", callback_data=f"edit_field_type:{listing_id}:photos")],
-        [InlineKeyboardButton(text="📍 Ubicación", callback_data=f"edit_field_type:{listing_id}:location")],
-        [InlineKeyboardButton(text="📞 Contacto", callback_data=f"edit_field_type:{listing_id}:contact")],
-        [InlineKeyboardButton(text="⬅️ Volver al Anuncio", callback_data=f"view_listing_edit:{listing_id}")]
-    ])
-    return keyboard
-
-def get_confirm_delete_keyboard(listing_id):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Sí, eliminar", callback_data=f"confirm_delete_yes:{listing_id}")],
-        [InlineKeyboardButton(text="❌ No, cancelar", callback_data=f"confirm_delete_no:{listing_id}")]
-    ])
+def get_cities_keyboard():
+    counts = count_listings_by_city()
+    keyboard = []
+    row = []
+    for i, city in enumerate(cities):
+        button_text = f"📍 {city} ({counts.get(city_mapping[city], 0)})"
+        row.append(InlineKeyboardButton(text=button_text, callback_data=f"search_city_{city}"))
+        if (i + 1) % 2 == 0 or i == len(cities) - 1:
+            keyboard.append(row)
+            row = []
+    keyboard.append([InlineKeyboardButton(text="⏭️ Omitir", callback_data="search_skip_city")])
+    keyboard.append([InlineKeyboardButton(text="❌ Cancelar", callback_data="cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 def get_expires_at_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📅 3 días"), KeyboardButton(text="📅 5 días")],
-            [KeyboardButton(text="🗓️ Sin fecha de caducidad")]
+            [KeyboardButton(text="❌ Cancelar")]
         ],
-        resize_keyboard=True,
-        one_time_keyboard=True
+        resize_keyboard=True
     )
 
-# ------------------------------ Handlers ------------------------------
+def get_skip_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="⏭️ Omitir")],
+            [KeyboardButton(text="❌ Cancelar")]
+        ],
+        resize_keyboard=True
+    )
 
-@dp.message(Command("start"))
-async def command_start_handler(message: Message, state: FSMContext) -> None:
-    await state.clear()
+def get_location_type_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🏙️ Solo ciudad")],
+            [KeyboardButton(text="📍 Enviar geolocalización", request_location=True)],
+            [KeyboardButton(text="❌ Cancelar")]
+        ],
+        resize_keyboard=True
+    )
+
+def get_edit_fields_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📋 Categoría"), KeyboardButton(text="✏️ Título")],
+            [KeyboardButton(text="💰 Precio"), KeyboardButton(text="📸 Foto principal")],
+            [KeyboardButton(text="📷 Fotos adicionales"), KeyboardButton(text="📝 Descripción")],
+            [KeyboardButton(text="🏙️ Ciudad"), KeyboardButton(text="📍 Geolocalización")],
+            [KeyboardButton(text="📞 Contacto"), KeyboardButton(text="📅 Vigencia")],
+            [KeyboardButton(text="❌ Cancelar")]
+        ],
+        resize_keyboard=True
+    )
+
+def get_confirm_delete_keyboard(listing_id):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Sí", callback_data=f"confirm_delete_{listing_id}")],
+        [InlineKeyboardButton(text="❌ No", callback_data="cancel")]
+    ])
+
+def get_item_card_keyboard(caller_is_search=False, caller_is_edit=False, current_index=0, total_results=0, listing_id=None):
+    keyboard_buttons = []
+    if caller_is_search:
+        if total_results > 1:
+            nav_buttons = []
+            if current_index > 0:
+                nav_buttons.append(InlineKeyboardButton(text="⬅️ Anterior", callback_data=f"search_prev_{current_index}"))
+            if current_index < total_results - 1:
+                nav_buttons.append(InlineKeyboardButton(text="Siguiente ➡️", callback_data=f"search_next_{current_index}"))
+            if nav_buttons:
+                keyboard_buttons.append(nav_buttons)
+        keyboard_buttons.append([InlineKeyboardButton(text="🔙 Volver a resultados de búsqueda", callback_data="back_to_search_results")])
+    elif caller_is_edit:
+        keyboard_buttons.append([InlineKeyboardButton(text="🔄 Editar nuevamente", callback_data=f"edit_item_{listing_id}")])
+        keyboard_buttons.append([InlineKeyboardButton(text="🗑 Eliminar", callback_data=f"delete_item_{listing_id}")])
+    keyboard_buttons.append([InlineKeyboardButton(text="❌ Cancelar", callback_data="cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+
+# 📋 States
+class ItemForm(StatesGroup):
+    item_category = State()
+    item_title = State()
+    item_description = State()
+    item_photo = State()
+    item_additional_photos = State()
+    item_price_value = State()
+    item_city = State()
+    item_ask_geolocation = State()
+    item_geolocation = State()
+    item_contact = State()
+    item_expires_at = State()
+
+class EditForm(StatesGroup):
+    select_item = State()
+    choose_field = State()
+    edit_category = State()
+    edit_title = State()
+    edit_description = State()
+    edit_photo = State()
+    edit_additional_photos = State()
+    edit_price_value = State()
+    edit_location_type = State()
+    edit_city = State()
+    edit_ask_geolocation = State()
+    edit_geolocation = State()
+    edit_contact = State()
+    edit_expires_at = State()
+
+class SearchForm(StatesGroup):
+    keyword = State()
+    category = State()
+    city = State()
+
+# 💾 Data handling functions
+async def load_user_data():
+    try:
+        if os.path.exists('user_data.json'):
+            with open('user_data.json', 'r', encoding='utf-8') as f:
+                global user_data
+                user_data = json.load(f)
+                user_data = {int(k): v for k, v in user_data.items()}
+            logger.info("✅ User data loaded successfully.")
+        else:
+            logger.info("ℹ️ user_data.json not found, starting with empty user_data.")
+    except json.JSONDecodeError as e:
+        logger.error(f"❌ JSON decode error in user_data.json: {e}")
+        user_data = {}
+    except Exception as e:
+        logger.error(f"❌ Failed to load user_data: {e}")
+        user_data = {}
+
+async def save_user_data():
+    try:
+        with open('user_data.json', 'w', encoding='utf-8') as f:
+            json.dump(user_data, f, ensure_ascii=False, indent=4, default=str)
+        logger.debug("💾 User data saved.")
+    except Exception as e:
+        logger.error(f"❌ Failed to save user_data: {e}")
+
+async def load_listings():
+    try:
+        if os.path.exists('listings.json'):
+            with open('listings.json', 'r', encoding='utf-8') as f:
+                global listings
+                loaded_listings = json.load(f)
+                listings = {}
+                for k, v in loaded_listings.items():
+                    try:
+                        if v['category'] == "Calzado":
+                            logger.info(f"ℹ️ Skipping listing {k} with category 'Calzado'")
+                            if v['user_id'] in user_data and k in user_data[v['user_id']]['listings']:
+                                user_data[v['user_id']]['listings'].remove(k)
+                            continue
+                        city = v.get('city')
+                        if city in city_mapping.values():
+                            v['city'] = city
+                        else:
+                            for short, full in city_mapping.items():
+                                if city == short:
+                                    v['city'] = full
+                                    break
+                        posted_at = datetime.datetime.fromisoformat(v['posted_at'].replace('Z', '+00:00'))
+                        expires_at = datetime.datetime.fromisoformat(v['expires_at'].replace('Z', '+00:00'))
+                        if 'is_free' not in v:
+                            v['is_free'] = v['status'] == 'free'
+                        listings[k] = {
+                            **v,
+                            'posted_at': posted_at,
+                            'expires_at': expires_at
+                        }
+                    except (ValueError, KeyError) as e:
+                        logger.warning(f"⚠️ Skipping invalid listing {k}: {e}")
+                        continue
+            await save_user_data()
+            logger.info("✅ Listings loaded successfully.")
+        else:
+            logger.info("ℹ️ listings.json not found, starting with empty listings.")
+    except json.JSONDecodeError as e:
+        logger.error(f"❌ JSON decode error in listings.json: {e}")
+        listings = {}
+    except Exception as e:
+        logger.error(f"❌ Failed to load listings: {e}")
+        listings = {}
+
+async def save_listings():
+    try:
+        with open('listings.json', 'w', encoding='utf-8') as f:
+            json.dump(listings, f, ensure_ascii=False, indent=4, default=str)
+        logger.debug("💾 Listings saved.")
+    except Exception as e:
+        logger.error(f"❌ Failed to save listings: {e}")
+
+def generate_listing_id():
+    return str(len(listings) + 1)
+
+def count_listings_by_category():
+    counts = {category.replace('📦 ', '').replace('🛋️ ', '').replace('📱 ', '').replace('👗 ', '').replace('👜 ', '').replace('📚 ', '').replace('🧸 ', '').replace('🔌 ', '').replace('🏀 ', '').replace('🌟 ', ''): 0 for category in categories}
+    counts['Gratis'] = 0
+    now = datetime.datetime.now()
+    for item in listings.values():
+        if item['expires_at'] > now:
+            if item.get('is_free', False):
+                counts['Gratis'] += 1
+            if item['category'].replace('📦 ', '').replace('🛋️ ', '').replace('📱 ', '').replace('👗 ', '').replace('👜 ', '').replace('📚 ', '').replace('🧸 ', '').replace('🔌 ', '').replace('🏀 ', '').replace('🌟 ', '') in counts:
+                counts[item['category'].replace('📦 ', '').replace('🛋️ ', '').replace('📱 ', '').replace('👗 ', '').replace('👜 ', '').replace('📚 ', '').replace('🧸 ', '').replace('🔌 ', '').replace('🏀 ', '').replace('🌟 ', '')] += 1
+    return counts
+
+def count_listings_by_city():
+    counts = {city: 0 for city in city_mapping.values()}
+    now = datetime.datetime.now()
+    for item in listings.values():
+        if item['expires_at'] > now and item['city'] in counts:
+            counts[item['city']] += 1
+    return counts
+
+async def display_item_card(chat_id, listing_id, message_id=None, caller_is_search=False, caller_is_edit=False, current_index=0, total_results=0):
+    item = listings.get(listing_id)
+    if not item:
+        logger.warning(f"⚠️ Attempt to display nonexistent listing ID: {listing_id}")
+        return
+
+    item_title = escape(item['title'])
+    item_category = escape(item['category'])
+    item_price = escape(str(item['price']))
+    item_contact = escape(item['contact'])
+    item_posted_at = item['posted_at'].strftime("%d.%m.%Y")
+    item_expires_at = item['expires_at'].strftime("%d.%m.%Y")
+
+    location_info = f"<b>📍 Ciudad:</b> {escape(item['city'])}"
+    if item.get('latitude') is not None and item.get('longitude') is not None:
+        location_info += f" (<a href='http://maps.google.com/maps?q={item['latitude']},{item['longitude']}'>Mostrar en el mapa</a>)"
+
+    description_info = f"📝 Descripción: {escape(item.get('description', ''))}" if item.get('description') else ""
+    bundle_note = "📦 Kit de objetos para mudanza" if item['category'] == "📦 ¡Kit de mudanza!" else ""
+
+    title_prefix = "♾ ¡Gratis!" if item.get('is_free', False) else ""
+    notification = ""
+    if not caller_is_search and not caller_is_edit:
+        notification = f"<b>✅ Anuncio #{item['id']} publicado exitosamente!</b>\n"
+    elif caller_is_edit:
+        notification = f"<b>✅ Anuncio #{item['id']} editado exitosamente!</b>\n"
+
+    caption_text = (
+        f"{notification}"
+        f"<b>{title_prefix} {item_title}</b>\n"
+        f"📋 Categoría: {item_category}\n"
+        f"{bundle_note}\n"
+        f"💰 Precio: {item_price}\n"
+        f"{description_info}\n"
+        f"{location_info}\n"
+        f"📞 Contacto: {item_contact}\n"
+        f"📅 Publicado: {item_posted_at}\n"
+        f"⏰ Vence: {item_expires_at}\n"
+    ).strip()
+
+    photos = [item['photo_id']] + item.get('additional_photo_ids', [])
+    media_group = []
+
+    for i, photo_id in enumerate(photos):
+        if i == 0:
+            media_group.append(InputMediaPhoto(media=photo_id, caption=caption_text, parse_mode=ParseMode.HTML))
+        else:
+            media_group.append(InputMediaPhoto(media=photo_id))
+
+    reply_markup = get_item_card_keyboard(caller_is_search, caller_is_edit, current_index, total_results, listing_id)
+
+    try:
+        if media_group:
+            sent_messages = await bot.send_media_group(chat_id=chat_id, media=media_group)
+            if reply_markup:
+                await bot.send_message(chat_id=chat_id, text="⬆️⬆️ Anuncio completo arriba ⬆️⬆️", reply_markup=reply_markup)
+        else:
+            await bot.send_message(chat_id=chat_id, text=caption_text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+    except TelegramBadRequest as e:
+        logger.error(f"❌ Failed to send item card for {listing_id}: {e}")
+        await bot.send_message(chat_id=chat_id, text="❗ Error al mostrar el anuncio.", reply_markup=main_keyboard)
+
+async def display_search_results(message: Message, state: FSMContext):
+    data = await state.get_data()
+    results = data.get('search_results', [])
     user_id = message.from_user.id
-    username = message.from_user.username
-    full_name = message.from_user.full_name
 
-    if user_id not in users_data:
-        users_data[user_id] = {
-            'username': username,
-            'full_name': full_name,
-            'first_access': datetime.datetime.now().isoformat()
-        }
+    if not results:
+        await message.answer("🔍 No se encontraron resultados de búsqueda. Inicie una nueva búsqueda.", reply_markup=main_keyboard)
+        await state.clear()
+        return
+
+    keyboard_buttons = []
+    for idx, listing_id in enumerate(results[:5]):
+        item = listings[listing_id]
+        button_text = f"#{item['id']} {'♾ ¡Gratis!' if item.get('is_free', False) else ''} {item['title']} ({item['price']})"
+        keyboard_buttons.append([InlineKeyboardButton(text=button_text, callback_data=f"view_search_item_{listing_id}_{idx}")])
+    if len(results) > 5:
+        keyboard_buttons.append([InlineKeyboardButton(text="➡️ Mostrar más", callback_data="show_more_results")])
+    keyboard_buttons.append([InlineKeyboardButton(text="❌ Cancelar", callback_data="cancel")])
+
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+    await message.reply(f"🛒 Anuncios encontrados: {len(results)}. Seleccione para ver:", reply_markup=reply_markup)
+
+# 🤖 Handlers
+@dp.message(Command("start"))
+async def cmd_start(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    if message.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring command from bot: user_id={user_id}")
+        return
+    if user_id not in user_data:
+        user_data[user_id] = {"listings": [], "favorites": [], "banned": False}
         await save_user_data()
-        logger.info(f"🆕 Nuevo usuario registrado: {user_id} ({full_name})")
+    if user_data.get(user_id, {}).get('banned', False):
+        await message.answer("🚫 Su cuenta está bloqueada. Contacte al administrador.")
+        return
+    await message.answer(
+        "👋 ¡Bienvenido! Seleccione una acción:",
+        reply_markup=main_keyboard
+    )
+    await state.clear()
+
+@dp.message(F.text == "❌ Cancelar")
+async def cancel_action(message: Message, state: FSMContext):
+    if message.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring command from bot: user_id={message.from_user.id}")
+        return
+    await message.answer("✅ Acción cancelada.", reply_markup=main_keyboard)
+    await state.clear()
+
+@dp.message(F.text == "🧳 Dejar objetos")
+async def add_item_start(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    if message.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring command from bot: user_id={user_id}")
+        return
+    if user_data.get(user_id, {}).get('banned', False):
+        await message.answer("🚫 Su cuenta está bloqueada.")
+        return
+    await message.answer(
+        "📋 Seleccione la categoría para el objeto o '📦 ¡Kit de mudanza!' para un conjunto de objetos:",
+        reply_markup=get_categories_keyboard()
+    )
+    await state.set_state(ItemForm.item_category)
+
+@dp.message(ItemForm.item_category)
+async def process_category(message: Message, state: FSMContext):
+    category = message.text.strip()
+    if category not in categories:
         await message.answer(
-            f"¡Hola {escape(message.from_user.full_name)}! 👋\n"
-            "Bienvenido al bot de compra y venta. Aquí puedes publicar tus anuncios y encontrar lo que buscas.",
+            "❗ Por favor, seleccione una categoría de las propuestas:",
+            reply_markup=get_categories_keyboard()
+        )
+        return
+    await state.update_data(item_category=category)
+    title_prompt = "✏️ Ingrese el título del conjunto (hasta 50 caracteres):" if category == "📦 ¡Kit de mudanza!" else "✏️ Ingrese el título del objeto (hasta 50 caracteres):"
+    await message.answer(
+        title_prompt,
+        reply_markup=cancel_keyboard
+    )
+    await state.set_state(ItemForm.item_title)
+
+@dp.message(ItemForm.item_title)
+async def process_title(message: Message, state: FSMContext):
+    title = message.text.strip()
+    if len(title) > 50:
+        await message.answer(
+            "❗ El título es demasiado largo. Ingrese hasta 50 caracteres:",
+            reply_markup=cancel_keyboard
+        )
+        return
+    await state.update_data(item_title=title)
+    await message.answer(
+        "📝 Ingrese la descripción del objeto (hasta 200 caracteres, opcional):",
+        reply_markup=get_skip_keyboard()
+    )
+    await state.set_state(ItemForm.item_description)
+
+@dp.message(ItemForm.item_description, F.text == "⏭️ Omitir")
+async def skip_description(message: Message, state: FSMContext):
+    await state.update_data(item_description="")
+    await message.answer(
+        "📸 Envíe la foto principal del objeto:",
+        reply_markup=cancel_keyboard
+    )
+    await state.set_state(ItemForm.item_photo)
+
+@dp.message(ItemForm.item_description)
+async def process_description(message: Message, state: FSMContext):
+    description = message.text.strip()
+    if len(description) > 200:
+        await message.answer(
+            "❗ La descripción es demasiado larga. Ingrese hasta 200 caracteres o omita:",
+            reply_markup=get_skip_keyboard()
+        )
+        return
+    await state.update_data(item_description=description)
+    await message.answer(
+        "📸 Envíe la foto principal del objeto:",
+        reply_markup=cancel_keyboard
+    )
+    await state.set_state(ItemForm.item_photo)
+
+@dp.message(ItemForm.item_photo, F.photo)
+async def process_photo(message: Message, state: FSMContext):
+    photo_id = message.photo[-1].file_id
+    await state.update_data(item_photo_id=photo_id)
+    data = await state.get_data()
+    max_photos = 9 if data.get('item_category') == "📦 ¡Kit de mudanza!" else 3
+    await message.answer(
+        f"📷 Envíe hasta {max_photos} fotos adicionales o omita:",
+        reply_markup=get_skip_keyboard()
+    )
+    await state.set_state(ItemForm.item_additional_photos)
+
+@dp.message(ItemForm.item_additional_photos, F.text == "⏭️ Omitir")
+async def skip_additional_photos(message: Message, state: FSMContext):
+    await state.update_data(item_additional_photo_ids=[])
+    await message.answer(
+        "💰 Indique el precio (en dólares) o 'Gratis':\nIngrese 0 para un anuncio gratuito o el monto (por ejemplo, 10.50).",
+        reply_markup=cancel_keyboard
+    )
+    await state.set_state(ItemForm.item_price_value)
+
+@dp.message(ItemForm.item_additional_photos, F.photo)
+async def process_additional_photos(message: Message, state: FSMContext):
+    data = await state.get_data()
+    max_photos = 9 if data.get('item_category') == "📦 ¡Kit de mudanza!" else 3
+    additional_photos = data.get('item_additional_photo_ids', [])
+    if len(additional_photos) >= max_photos:
+        await message.answer(
+            f"📷 Se alcanzó el máximo ({max_photos} fotos adicionales). Presione '⏭️ Omitir'.",
+            reply_markup=get_skip_keyboard()
+        )
+        return
+    additional_photos.append(message.photo[-1].file_id)
+    await state.update_data(item_additional_photo_ids=additional_photos)
+    await message.answer(
+        f"✅ Foto agregada ({len(additional_photos)}/{max_photos}). Agregue más o omita:",
+        reply_markup=get_skip_keyboard()
+    )
+
+@dp.message(ItemForm.item_price_value)
+async def process_price_value(message: Message, state: FSMContext):
+    price_text = message.text.strip().lower()
+    logger.debug(f"💰 Processing price input: '{price_text}'")
+    if price_text == "gratis":
+        await state.update_data(item_price="Gratis", item_status="free", is_free=True)
+        await message.answer("🏙️ Indique la ciudad:", reply_markup=get_cities_keyboard())
+        await state.set_state(ItemForm.item_city)
+        return
+    try:
+        price = float(price_text)
+        if price < 0:
+            raise ValueError
+        if price == 0:
+            await state.update_data(item_price="Gratis", item_status="free", is_free=True)
+        else:
+            await state.update_data(item_price=f"{price:.2f}", item_status="sell", is_free=False)
+        await message.answer("🏙️ Indique la ciudad:", reply_markup=get_cities_keyboard())
+        await state.set_state(ItemForm.item_city)
+    except ValueError:
+        await message.answer(
+            "❗ Ingrese un precio válido (número ≥ 0, por ejemplo, 10.50) o 'Gratis'.",
+            reply_markup=cancel_keyboard
+        )
+
+@dp.message(ItemForm.item_city)
+async def process_city(message: Message, state: FSMContext):
+    city = message.text.strip()
+    if city not in cities:
+        await message.answer(
+            "❗ Por favor, seleccione una ciudad de las propuestas:",
+            reply_markup=get_cities_keyboard()
+        )
+        return
+    await state.update_data(item_city=city_mapping[city])
+    await message.answer(
+        "📍 Indique la ubicación:",
+        reply_markup=get_location_type_keyboard()
+    )
+    await state.set_state(ItemForm.item_ask_geolocation)
+
+@dp.callback_query(F.data.startswith("search_city_"), ItemForm.item_city)
+async def process_item_city_callback(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring callback from bot: user_id={callback.from_user.id}")
+        await callback.answer()
+        return
+    city = callback.data.replace("search_city_", "")
+    logger.debug(f"📍 Item city selected: '{city}'")
+    if city not in cities:
+        await callback.message.answer(
+            "❗ Error: ciudad no encontrada.",
             reply_markup=main_keyboard
         )
-        if ADMIN_ID and user_id != ADMIN_ID: # Оповестить админа о новом пользователе
-            await bot.send_message(ADMIN_ID, f"🎉 Nuevo usuario: {full_name} (@{username if username else 'N/A'}) (ID: {user_id})")
-    else:
-        users_data[user_id]['username'] = username # Обновляем никнейм на случай изменения
-        users_data[user_id]['full_name'] = full_name # Обновляем полное имя
-        await save_user_data()
-        await message.answer(
-            f"¡Hola de nuevo {escape(message.from_user.full_name)}! 👋",
-            reply_markup=main_keyboard if user_id != ADMIN_ID else get_main_keyboard_admin()
-        )
-    logger.info(f"➡️ Usuario {user_id} inició el bot.")
-
-
-@dp.message(F.text == "➕ Publicar Anuncio")
-async def start_new_listing(message: Message, state: FSMContext):
-    await state.clear()
-    await state.set_state(Form.title)
-    await message.answer("¡Empecemos! ¿Cuál es el título de tu anuncio? (Ej: 'IPhone 15 Pro Max 256GB')")
-    logger.info(f"➡️ Usuario {message.from_user.id} inició la publicación de un anuncio.")
-
-@dp.message(Form.title)
-async def process_title(message: Message, state: FSMContext):
-    if len(message.text) > 100:
-        await message.answer("❗ El título es demasiado largo. Por favor, que no exceda 100 caracteres.")
+        await state.clear()
+        await callback.message.delete()
         return
-    await state.update_data(title=message.text)
-    await state.set_state(Form.description)
-    await message.answer("Ahora, una descripción detallada. (Ej: 'Como nuevo, con garantía, incluye accesorios')")
-
-@dp.message(Form.description)
-async def process_description(message: Message, state: FSMContext):
-    if len(message.text) > 1000:
-        await message.answer("❗ La descripción es demasiado larga. Por favor, que no exceda 1000 caracteres.")
-        return
-    await state.update_data(description=message.text)
-    await state.set_state(Form.category)
-    await message.answer(
-        "¿En qué categoría encaja tu anuncio?",
-        reply_markup=ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="📱 Electrónica"), KeyboardButton(text="👗 Moda")],
-                [KeyboardButton(text="🏡 Hogar"), KeyboardButton(text="🚗 Vehículos")],
-                [KeyboardButton(text="📚 Libros"), KeyboardButton(text="🏀 Deportes")],
-                [KeyboardButton(text="💼 Servicios"), KeyboardButton(text="✨ Otros")]
-            ],
-            resize_keyboard=True, one_time_keyboard=True
-        )
+    await state.update_data(item_city=city_mapping[city])
+    await callback.message.answer(
+        "📍 Indique la ubicación:",
+        reply_markup=get_location_type_keyboard()
     )
+    await state.set_state(ItemForm.item_ask_geolocation)
+    await callback.message.delete()
+    await callback.answer()
 
-@dp.message(Form.category, F.text.in_({"📱 Electrónica", "👗 Moda", "🏡 Hogar", "🚗 Vehículos", "📚 Libros", "🏀 Deportes", "💼 Servicios", "✨ Otros"}))
-async def process_category(message: Message, state: FSMContext):
-    await state.update_data(category=message.text)
-    await state.set_state(Form.price)
-    await message.answer("¿Cuál es el precio? (Ej: '150.50' o 'Negociable')", reply_markup=None) # Quitar teclado anterior
-
-@dp.message(Form.category)
-async def process_category_invalid(message: Message):
-    await message.answer("❗ Por favor, seleccione una categoría de la lista.")
-
-@dp.message(Form.price)
-async def process_price(message: Message, state: FSMContext):
-    price_text = message.text.replace(',', '.').strip()
-    if price_text.lower() == 'negociable':
-        await state.update_data(price='Negociable')
-    else:
-        try:
-            price = float(price_text)
-            if price <= 0:
-                raise ValueError
-            await state.update_data(price=f"{price:.2f}") # Formatear a 2 decimales
-        except ValueError:
-            await message.answer("❗ Formato de precio inválido. Por favor, introduzca un número (ej: '150.50') o 'Negociable'.")
-            return
-    await state.update_data(photos=[]) # Inicializar lista de fotos
-    await state.set_state(Form.photos)
-    await message.answer(
-        "¡Perfecto! Ahora, envía hasta 10 fotos de tu artículo. Puedes enviar varias a la vez. Cuando termines, envía 'Listo'.",
-        reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Listo")]], resize_keyboard=True)
-    )
-
-@dp.message(Form.photos, F.photo)
-async def process_photos(message: Message, state: FSMContext):
-    data = await state.get_data()
-    photos = data.get('photos', [])
-    
-    if len(photos) >= 10:
-        await message.answer("❗ Ya tienes el máximo de 10 fotos. Por favor, envía 'Listo'.")
+@dp.callback_query(F.data == "search_skip_city", ItemForm.item_city)
+async def skip_item_city_callback(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring callback from bot: user_id={callback.from_user.id}")
+        await callback.answer()
         return
-    
-    # Tomar la ID de la foto de la mayor resolución
-    file_id = message.photo[-1].file_id
-    photos.append(file_id)
-    await state.update_data(photos=photos)
-    await message.answer(f"✅ Foto añadida. Tienes {len(photos)}/{10} fotos. Envía más o 'Listo'.")
-
-
-@dp.message(Form.photos, F.text == "Listo")
-async def process_photos_done(message: Message, state: FSMContext):
-    data = await state.get_data()
-    photos = data.get('photos', [])
-    if not photos:
-        await message.answer("❗ Por favor, envía al menos una foto antes de continuar, o continúa si no tienes fotos.")
-        # Opcional: permitir continuar sin fotos, si es el caso
-        # await message.answer("¿Estás seguro de que quieres continuar sin fotos? Si es así, envía 'Sí, sin fotos'.")
-        # await state.set_state(Form.confirm_no_photos) # Nuevo estado si se permite sin fotos
-        return
-
-    await state.set_state(Form.location)
-    await message.answer(
-        "Ahora, por favor, comparte tu ubicación o escribe la zona. (Ej: 'Guayaquil', 'Samborondón', 'Quito')",
-        reply_markup=ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text="Compartir mi ubicación actual", request_location=True)]],
-            resize_keyboard=True, one_time_keyboard=True
-        )
+    await state.update_data(item_city="")
+    await callback.message.answer(
+        "📍 Indique la ubicación:",
+        reply_markup=get_location_type_keyboard()
     )
+    await state.set_state(ItemForm.item_ask_geolocation)
+    await callback.message.delete()
+    await callback.answer()
 
-@dp.message(Form.location, F.location)
-async def process_location_by_coords(message: Message, state: FSMContext):
+@dp.message(ItemForm.item_ask_geolocation, F.text == "🏙️ Solo ciudad")
+async def process_location_city_only(message: Message, state: FSMContext):
+    await state.update_data(item_location_type="city")
+    await message.answer(
+        "📞 Ingrese la información de contacto (por ejemplo, número de teléfono):",
+        reply_markup=cancel_keyboard
+    )
+    await state.set_state(ItemForm.item_contact)
+
+@dp.message(ItemForm.item_ask_geolocation, F.location)
+async def process_location_geolocation(message: Message, state: FSMContext):
     await state.update_data(
-        location_latitude=message.location.latitude,
-        location_longitude=message.location.longitude,
-        location_name="Ubicación compartida por GPS" # Puedes intentar geocodificar para obtener nombre
+        item_location_type="geolocation",
+        item_latitude=message.location.latitude,
+        item_longitude=message.location.longitude
     )
-    await state.set_state(Form.contact)
     await message.answer(
-        "¡Excelente! Ahora, ingresa tu usuario de Telegram para contacto. (Ej: @tu_usuario) o tu número de teléfono.",
-        reply_markup=None # Remover teclado anterior
+        "📞 Ingrese la información de contacto (por ejemplo, número de teléfono):",
+        reply_markup=cancel_keyboard
     )
+    await state.set_state(ItemForm.item_contact)
 
-@dp.message(Form.location)
-async def process_location_by_text(message: Message, state: FSMContext):
-    if len(message.text) > 100:
-        await message.answer("❗ El nombre de la ubicación es demasiado largo. Por favor, que no exceda 100 caracteres.")
-        return
-    await state.update_data(location_name=message.text)
-    await state.update_data(location_latitude=None, location_longitude=None) # Asegurarse que no hay coords si es texto
-    await state.set_state(Form.contact)
-    await message.answer(
-        "¡Excelente! Ahora, ingresa tu usuario de Telegram para contacto. (Ej: @tu_usuario) o tu número de teléfono.",
-        reply_markup=None
-    )
-
-
-@dp.message(Form.contact)
+@dp.message(ItemForm.item_contact)
 async def process_contact(message: Message, state: FSMContext):
-    contact_info = message.text.strip()
-    if not contact_info:
-        await message.answer("❗ Por favor, ingrese su información de contacto.")
+    contact = message.text.strip()
+    if not contact:
+        await message.answer(
+            "❗ La información de contacto no puede estar vacía. Ingrese, por ejemplo, un número de teléfono:",
+            reply_markup=cancel_keyboard
+        )
         return
-    if len(contact_info) > 100:
-        await message.answer("❗ La información de contacto es demasiado larga. Por favor, que no exceda 100 caracteres.")
-        return
-    await state.update_data(contact=contact_info)
-    await state.set_state(Form.terms_agreed)
+    await state.update_data(item_contact=contact)
     await message.answer(
-        "Antes de publicar, por favor, acepta nuestros términos y condiciones: [enlace a T&C](https://telegra.ph/T%C3%A9rminos-y-Condiciones-05-18) (Este es un ejemplo, reemplázalo con tus T&C reales).\n\n"
-        "¿Aceptas los términos y condiciones?",
-        reply_markup=ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text="✅ Acepto los términos")]],
-            resize_keyboard=True, one_time_keyboard=True
-        )
-    )
-
-@dp.message(Form.terms_agreed, F.text == "✅ Acepto los términos")
-async def process_terms_agreed(message: Message, state: FSMContext):
-    data = await state.get_data()
-    
-    # Generar un ID único para el anuncio
-    listing_id = generate_listing_id()
-    
-    # Guardar todos los datos del formulario junto con el ID del usuario y la fecha
-    listings[listing_id] = {
-        'user_id': message.from_user.id,
-        'username': message.from_user.username,
-        'full_name': message.from_user.full_name,
-        'published_at': datetime.datetime.now().isoformat(), # Fecha de publicación
-        'status': 'active', # Estado inicial del anuncio
-        **data # Desempaquetar todos los datos del formulario
-    }
-    
-    # Establecer duración por defecto a 3 дня
-    listings[listing_id]['expires_at'] = datetime.datetime.now() + datetime.timedelta(days=3)
-
-    await save_listings() # Guardar los anuncios
-
-    await state.set_state(Form.confirm_publish)
-    await display_item_card(message.from_user.id, listing_id, caller_is_edit=False) # Mostrar el anuncio creado
-
-    await message.answer(
-        "¡Tu anuncio está casi listo! Confirma para publicarlo o puedes editarlo.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🚀 Publicar Anuncio", callback_data=f"publish_confirm:{listing_id}")],
-            [InlineKeyboardButton(text="📝 Editar Anuncio", callback_data=f"edit_listing:{listing_id}")]
-        ])
-    )
-    logger.info(f"📝 Anuncio {listing_id} creado por {message.from_user.id}, esperando confirmación.")
-
-@dp.message(Form.terms_agreed)
-async def process_terms_invalid(message: Message):
-    await message.answer("❗ Por favor, debe aceptar los términos para continuar.")
-
-@dp.callback_query(F.data.startswith("publish_confirm:"))
-async def confirm_publish_listing(callback_query: CallbackQuery, state: FSMContext):
-    await callback_query.answer()
-    listing_id = callback_query.data.split(":")[1]
-
-    if listing_id not in listings:
-        await bot.send_message(callback_query.from_user.id, "❗ Anuncio no encontrado o ya publicado.")
-        await state.clear()
-        await callback_query.message.delete_reply_markup()
-        return
-
-    # Aquí podríamos hacer algo con el estado 'confirm_publish' si fuera necesario,
-    # pero como ya está todo en `listings`, solo confirmamos.
-    listings[listing_id]['status'] = 'active' # Aseguramos que el estado es activo
-    await save_listings()
-
-    await bot.send_message(
-        callback_query.from_user.id,
-        f"✅ ¡Tu anuncio #{listing_id} ha sido publicado exitosamente!\n"
-        "Puedes verlo en '🔍 Mis Anuncios'.",
-        reply_markup=main_keyboard if callback_query.from_user.id != ADMIN_ID else get_main_keyboard_admin()
-    )
-    await callback_query.message.delete_reply_markup() # Eliminar botones de confirmación
-    await state.clear()
-    logger.info(f"✅ Anuncio {listing_id} publicado por {callback_query.from_user.id}.")
-
-# ------------------------------ Mis Anuncios ------------------------------
-
-@dp.message(F.text == "🔍 Mis Anuncios")
-@dp.callback_query(F.data == "my_listings")
-async def show_my_listings(update: Message | CallbackQuery, state: FSMContext):
-    await state.clear()
-    user_id = update.from_user.id
-    user_listings = {lid: info for lid, info in listings.items() if info.get('user_id') == user_id}
-
-    if isinstance(update, CallbackQuery):
-        await update.answer()
-        # await update.message.delete_reply_markup() # Opcional: удалить предыдущие кнопки
-
-    if not user_listings:
-        if isinstance(update, Message):
-            await update.answer("No tienes anuncios publicados aún. ¡Publica uno con '➕ Publicar Anuncio'!", reply_markup=main_keyboard)
-        else: # CallbackQuery
-            await update.message.answer("No tienes anuncios publicados aún. ¡Publica uno con '➕ Publicar Anuncio'!", reply_markup=main_keyboard)
-        logger.info(f"➡️ Usuario {user_id} no tiene anuncios.")
-        return
-
-    message_text = "Mis anuncios:\n"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
-
-    sorted_listings = sorted(user_listings.items(), key=lambda item: item[1].get('published_at', ''), reverse=True)
-
-    for listing_id, info in sorted_listings:
-        title = escape(info.get('title', 'N/A'))
-        status_icon = "🟢" if info.get('status') == 'active' else "🔴" # Añadir icono de estado
-        message_text += f"{status_icon} Anuncio #{listing_id}: {title}\n"
-        keyboard.inline_keyboard.append([
-            InlineKeyboardButton(text=f"Ver Anuncio #{listing_id}", callback_data=f"view_listing_edit:{listing_id}")
-        ])
-    
-    keyboard.inline_keyboard.append([InlineKeyboardButton(text="⬅️ Menú Principal", callback_data="back_to_main")])
-
-    if isinstance(update, Message):
-        await update.answer(message_text, reply_markup=keyboard)
-    else: # CallbackQuery
-        try:
-            await update.message.edit_text(message_text, reply_markup=keyboard)
-        except TelegramBadRequest: # Si el texto no cambió, solo actualizar el markup
-            await update.message.answer(message_text, reply_markup=keyboard) # Enviar como nuevo mensaje si falla la edición
-    logger.info(f"➡️ Usuario {user_id} vio sus anuncios.")
-
-@dp.callback_query(F.data.startswith("view_listing_edit:"))
-async def view_listing_from_edit(callback_query: CallbackQuery):
-    await callback_query.answer()
-    listing_id = callback_query.data.split(":")[1]
-    await display_item_card(callback_query.from_user.id, listing_id, caller_is_edit=True)
-    logger.info(f"➡️ Usuario {callback_query.from_user.id} viendo anuncio {listing_id} para edición.")
-
-
-# ------------------------------ Edición de Anuncios ------------------------------
-
-@dp.callback_query(F.data.startswith("edit_listing:"))
-async def edit_listing(callback_query: CallbackQuery, state: FSMContext):
-    await callback_query.answer()
-    listing_id = callback_query.data.split(":")[1]
-    
-    if listing_id not in listings or listings[listing_id]['user_id'] != callback_query.from_user.id:
-        if callback_query.from_user.id != ADMIN_ID: # Проверка админа
-            await bot.send_message(callback_query.from_user.id, "❗ No tienes permiso para editar este anuncio.")
-            return
-
-    await state.update_data(selected_item_id=listing_id)
-    await state.set_state(Form.edit_field)
-    await callback_query.message.answer(
-        f"¿Qué campo del anuncio #{listing_id} deseas editar?",
-        reply_markup=get_edit_field_keyboard(listing_id)
-    )
-    logger.info(f"➡️ Usuario {callback_query.from_user.id} inició edición del anuncio {listing_id}.")
-
-
-@dp.callback_query(F.data.startswith("edit_field_type:"))
-async def ask_for_edit_value(callback_query: CallbackQuery, state: FSMContext):
-    await callback_query.answer()
-    _, listing_id, field_type = callback_query.data.split(":")
-    
-    await state.update_data(selected_item_id=listing_id, field_to_edit=field_type)
-
-    if field_type == 'title':
-        await state.set_state(Form.edit_title)
-        await callback_query.message.answer(f"Ingresa el nuevo título para el anuncio #{listing_id}:")
-    elif field_type == 'description':
-        await state.set_state(Form.edit_description)
-        await callback_query.message.answer(f"Ingresa la nueva descripción para el anuncio #{listing_id}:")
-    elif field_type == 'category':
-        await state.set_state(Form.edit_category)
-        await callback_query.message.answer(
-            f"Selecciona la nueva categoría para el anuncio #{listing_id}:",
-            reply_markup=ReplyKeyboardMarkup(
-                keyboard=[
-                    [KeyboardButton(text="📱 Electrónica"), KeyboardButton(text="👗 Moda")],
-                    [KeyboardButton(text="🏡 Hogar"), KeyboardButton(text="🚗 Vehículos")],
-                    [KeyboardButton(text="📚 Libros"), KeyboardButton(text="🏀 Deportes")],
-                    [KeyboardButton(text="💼 Servicios"), KeyboardButton(text="✨ Otros")]
-                ],
-                resize_keyboard=True, one_time_keyboard=True
-            )
-        )
-    elif field_type == 'price':
-        await state.set_state(Form.edit_price)
-        await callback_query.message.answer(f"Ingresa el nuevo precio para el anuncio #{listing_id}: (Ej: '150.50' o 'Negociable')")
-    elif field_type == 'photos':
-        await state.update_data(photos=[]) # Resetear fotos para una nueva carga
-        await state.set_state(Form.edit_photos)
-        await callback_query.message.answer(
-            f"Envía hasta 10 fotos nuevas para el anuncio #{listing_id}. Cuando termines, envía 'Listo'.\n"
-            "Las fotos anteriores serán reemplazadas.",
-            reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Listo")]], resize_keyboard=True)
-        )
-    elif field_type == 'location':
-        await state.set_state(Form.edit_location)
-        await callback_query.message.answer(
-            f"Ingresa la nueva ubicación o comparte tu ubicación actual para el anuncio #{listing_id}:",
-            reply_markup=ReplyKeyboardMarkup(
-                keyboard=[[KeyboardButton(text="Compartir mi ubicación actual", request_location=True)]],
-                resize_keyboard=True, one_time_keyboard=True
-            )
-        )
-    elif field_type == 'contact':
-        await state.set_state(Form.edit_contact)
-        await callback_query.message.answer(f"Ingresa la nueva información de contacto para el anuncio #{listing_id}: (Ej: @tu_usuario o tu número)")
-    logger.info(f"➡️ Usuario {callback_query.from_user.id} seleccionó editar {field_type} para anuncio {listing_id}.")
-
-
-# Handlers para los campos de edición específicos
-@dp.message(Form.edit_title)
-async def process_edit_title(message: Message, state: FSMContext):
-    if len(message.text) > 100:
-        await message.answer("❗ El título es demasiado largo. Por favor, que no exceda 100 caracteres.")
-        return
-    data = await state.get_data()
-    listing_id = data.get('selected_item_id')
-    listings[listing_id]['title'] = message.text
-    await save_listings()
-    logger.info(f"✅ Usuario {message.from_user.id} editó el título del artículo {listing_id}.")
-    await display_item_card(message.from_user.id, listing_id, caller_is_edit=True)
-    await state.clear()
-
-@dp.message(Form.edit_description)
-async def process_edit_description(message: Message, state: FSMContext):
-    if len(message.text) > 1000:
-        await message.answer("❗ La descripción es demasiado larga. Por favor, que no exceda 1000 caracteres.")
-        return
-    data = await state.get_data()
-    listing_id = data.get('selected_item_id')
-    listings[listing_id]['description'] = message.text
-    await save_listings()
-    logger.info(f"✅ Usuario {message.from_user.id} editó la descripción del artículo {listing_id}.")
-    await display_item_card(message.from_user.id, listing_id, caller_is_edit=True)
-    await state.clear()
-
-@dp.message(Form.edit_category, F.text.in_({"📱 Electrónica", "👗 Moda", "🏡 Hogar", "🚗 Vehículos", "📚 Libros", "🏀 Deportes", "💼 Servicios", "✨ Otros"}))
-async def process_edit_category(message: Message, state: FSMContext):
-    data = await state.get_data()
-    listing_id = data.get('selected_item_id')
-    listings[listing_id]['category'] = message.text
-    await save_listings()
-    logger.info(f"✅ Usuario {message.from_user.id} editó la categoría del artículo {listing_id}.")
-    await display_item_card(message.from_user.id, listing_id, caller_is_edit=True)
-    await state.clear()
-
-@dp.message(Form.edit_category)
-async def process_edit_category_invalid(message: Message):
-    await message.answer("❗ Por favor, seleccione una categoría de la lista.")
-
-@dp.message(Form.edit_price)
-async def process_edit_price(message: Message, state: FSMContext):
-    price_text = message.text.replace(',', '.').strip()
-    if price_text.lower() == 'negociable':
-        data = await state.get_data()
-        listing_id = data.get('selected_item_id')
-        listings[listing_id]['price'] = 'Negociable'
-    else:
-        try:
-            price = float(price_text)
-            if price <= 0:
-                raise ValueError
-            data = await state.get_data()
-            listing_id = data.get('selected_item_id')
-            listings[listing_id]['price'] = f"{price:.2f}"
-        except ValueError:
-            await message.answer("❗ Formato de precio inválido. Por favor, introduzca un número (ej: '150.50') o 'Negociable'.")
-            return
-    await save_listings()
-    logger.info(f"✅ Usuario {message.from_user.id} editó el precio del artículo {listing_id}.")
-    await display_item_card(message.from_user.id, listing_id, caller_is_edit=True)
-    await state.clear()
-
-@dp.message(Form.edit_photos, F.photo)
-async def process_edit_photos(message: Message, state: FSMContext):
-    data = await state.get_data()
-    photos = data.get('photos', [])
-    
-    if len(photos) >= 10:
-        await message.answer("❗ Ya tienes el máximo de 10 fotos. Por favor, envía 'Listo'.")
-        return
-    
-    file_id = message.photo[-1].file_id
-    photos.append(file_id)
-    await state.update_data(photos=photos)
-    await message.answer(f"✅ Foto añadida. Tienes {len(photos)}/{10} fotos. Envía más o 'Listo'.")
-
-@dp.message(Form.edit_photos, F.text == "Listo")
-async def process_edit_photos_done(message: Message, state: FSMContext):
-    data = await state.get_data()
-    listing_id = data.get('selected_item_id')
-    photos = data.get('photos', [])
-
-    if not photos:
-        await message.answer("❗ Por favor, envía al menos una foto antes de continuar con la edición de fotos.")
-        return
-    
-    listings[listing_id]['photos'] = photos # Reemplazar fotos existentes
-    await save_listings()
-    logger.info(f"✅ Usuario {message.from_user.id} editó las fotos del artículo {listing_id}.")
-    await display_item_card(message.from_user.id, listing_id, caller_is_edit=True)
-    await state.clear()
-
-@dp.message(Form.edit_location, F.location)
-async def process_edit_location_by_coords(message: Message, state: FSMContext):
-    data = await state.get_data()
-    listing_id = data.get('selected_item_id')
-    listings[listing_id]['location_latitude'] = message.location.latitude
-    listings[listing_id]['location_longitude'] = message.location.longitude
-    listings[listing_id]['location_name'] = "Ubicación compartida por GPS"
-    await save_listings()
-    logger.info(f"✅ Usuario {message.from_user.id} editó la ubicación (GPS) del artículo {listing_id}.")
-    await display_item_card(message.from_user.id, listing_id, caller_is_edit=True)
-    await state.clear()
-
-@dp.message(Form.edit_location)
-async def process_edit_location_by_text(message: Message, state: FSMContext):
-    if len(message.text) > 100:
-        await message.answer("❗ El nombre de la ubicación es demasiado largo. Por favor, que no exceda 100 caracteres.")
-        return
-    data = await state.get_data()
-    listing_id = data.get('selected_item_id')
-    listings[listing_id]['location_name'] = message.text
-    listings[listing_id]['location_latitude'] = None # Resetear coords si se usa texto
-    listings[listing_id]['location_longitude'] = None
-    await save_listings()
-    logger.info(f"✅ Usuario {message.from_user.id} editó la ubicación (texto) del artículo {listing_id}.")
-    await display_item_card(message.from_user.id, listing_id, caller_is_edit=True)
-    await state.clear()
-
-@dp.message(Form.edit_contact)
-async def process_edit_contact(message: Message, state: FSMContext):
-    contact_info = message.text.strip()
-    if not contact_info:
-        await message.answer("❗ Por favor, ingrese su información de contacto.")
-        return
-    if len(contact_info) > 100:
-        await message.answer("❗ La información de contacto es demasiado larga. Por favor, que no exceda 100 caracteres.")
-        return
-    data = await state.get_data()
-    listing_id = data.get('selected_item_id')
-    listings[listing_id]['contact'] = contact_info
-    await save_listings()
-    logger.info(f"✅ Usuario {message.from_user.id} editó el contacto del artículo {listing_id}.")
-    await display_item_card(message.from_user.id, listing_id, caller_is_edit=True)
-    await state.clear()
-
-# ------------------------------ Eliminar Anuncios ------------------------------
-
-@dp.callback_query(F.data.startswith("delete_listing:"))
-async def confirm_delete_listing(callback_query: CallbackQuery, state: FSMContext):
-    await callback_query.answer()
-    listing_id = callback_query.data.split(":")[1]
-    
-    if listing_id not in listings or (listings[listing_id]['user_id'] != callback_query.from_user.id and callback_query.from_user.id != ADMIN_ID):
-        await bot.send_message(callback_query.from_user.id, "❗ No tienes permiso para eliminar este anuncio.")
-        return
-
-    await state.update_data(selected_item_id=listing_id)
-    await state.set_state(Form.confirm_delete)
-    await callback_query.message.answer(
-        f"¿Estás seguro de que quieres eliminar el anuncio #{listing_id}?",
-        reply_markup=get_confirm_delete_keyboard(listing_id)
-    )
-    logger.info(f"➡️ Usuario {callback_query.from_user.id} inició proceso de eliminación para anuncio {listing_id}.")
-
-@dp.callback_query(F.data.startswith("confirm_delete_yes:"))
-async def execute_delete_listing(callback_query: CallbackQuery, state: FSMContext):
-    await callback_query.answer()
-    listing_id = callback_query.data.split(":")[1]
-
-    if listing_id not in listings or (listings[listing_id]['user_id'] != callback_query.from_user.id and callback_query.from_user.id != ADMIN_ID):
-        await bot.send_message(callback_query.from_user.id, "❗ No tienes permiso para eliminar este anuncio o ya fue eliminado.")
-        await state.clear()
-        return
-
-    del listings[listing_id]
-    await save_listings()
-    await state.clear()
-    await callback_query.message.edit_text(f"✅ Anuncio #{listing_id} eliminado exitosamente.")
-    logger.info(f"❌ Usuario {callback_query.from_user.id} eliminó el anuncio {listing_id}.")
-    
-    # Después de eliminar, mostrar mis anuncios o menú principal
-    await show_my_listings(callback_query, state) # Intenta mostrar список объявлений
-
-@dp.callback_query(F.data.startswith("confirm_delete_no:"))
-async def cancel_delete_listing(callback_query: CallbackQuery, state: FSMContext):
-    await callback_query.answer()
-    listing_id = callback_query.data.split(":")[1]
-    await state.clear()
-    await callback_query.message.edit_text(f"🚫 Eliminación del anuncio #{listing_id} cancelada.")
-    logger.info(f"🚫 Usuario {callback_query.from_user.id} canceló eliminación del anuncio {listing_id}.")
-    await display_item_card(callback_query.from_user.id, listing_id, caller_is_edit=True) # Mostrar снова карточку
-
-
-# ------------------------------ Establecer vigencia ------------------------------
-
-@dp.callback_query(F.data.startswith("set_duration:"))
-async def set_duration_start(callback_query: CallbackQuery, state: FSMContext):
-    await callback_query.answer()
-    listing_id = callback_query.data.split(":")[1]
-    
-    if listing_id not in listings or (listings[listing_id]['user_id'] != callback_query.from_user.id and callback_query.from_user.id != ADMIN_ID):
-        await bot.send_message(callback_query.from_user.id, "❗ No tienes permiso para editar este anuncio.")
-        return
-
-    await state.update_data(selected_item_id=listing_id)
-    await state.set_state(Form.set_duration)
-    await callback_query.message.answer(
-        f"Selecciona la nueva vigencia para el anuncio #{listing_id}:",
+        "📅 Indique el período de validez del anuncio:",
         reply_markup=get_expires_at_keyboard()
     )
-    logger.info(f"➡️ Usuario {callback_query.from_user.id} inició configuración de vigencia para anuncio {listing_id}.")
+    await state.set_state(ItemForm.item_expires_at)
 
-@dp.message(Form.set_duration, F.text.in_({"📅 3 días", "📅 5 días", "🗓️ Sin fecha de caducidad"}))
-async def process_set_duration(message: Message, state: FSMContext):
-    days = None
-    if "3 días" in message.text:
-        days = 3
-    elif "5 días" in message.text:
-        days = 5
-    elif "Sin fecha de caducidad" in message.text:
-        days = 0 # Usamos 0 para indicar sin expiración
-    else:
-        # Это не должно произойти, так как мы проверяем на F.text.in_
+@dp.message(ItemForm.item_expires_at)
+async def process_expires_at(message: Message, state: FSMContext):
+    try:
+        days = int(message.text.replace("📅 ", "").replace(" días", "").replace(" día", ""))
+        if days not in [3, 5]:
+            raise ValueError
+    except ValueError:
         await message.answer(
-            "❗ Por favor, seleccione '📅 3 días', '📅 5 días' o '🗓️ Sin fecha de caducidad'.",
+            "❗ Por favor, seleccione '📅 3 días' o '📅 5 días'.",
+            reply_markup=get_expires_at_keyboard()
+        )
+        return
+
+    data = await state.get_data()
+    user_id = message.from_user.id
+    expires_at = datetime.datetime.now() + datetime.timedelta(days=days)
+
+    item = {
+        'id': generate_listing_id(),
+        'user_id': user_id,
+        'category': data.get('item_category'),
+        'title': data.get('item_title'),
+        'description': data.get('item_description', ""),
+        'photo_id': data.get('item_photo_id'),
+        'additional_photo_ids': data.get('item_additional_photo_ids', []),
+        'price': data.get('item_price'),
+        'status': data.get('item_status'),
+        'is_free': data.get('is_free', False),
+        'location_type': data.get('item_location_type', 'city'),
+        'city': data.get('item_city'),
+        'latitude': data.get('item_latitude'),
+        'longitude': data.get('item_longitude'),
+        'contact': data.get('item_contact'),
+        'posted_at': datetime.datetime.now(),
+        'expires_at': expires_at,
+        'views': 0
+    }
+
+    listings[item['id']] = item
+    if user_id not in user_data:
+        user_data[user_id] = {"listings": [], "favorites": [], "banned": False}
+    user_data[user_id]['listings'].append(item['id'])
+    await save_listings()
+    await save_user_data()
+
+    logger.info(f"✅ User {user_id} added item: {item['title']}")
+    await display_item_card(user_id, item['id'])
+    await message.answer("🎉 ¡Anuncio creado! Seleccione una acción:", reply_markup=main_keyboard)
+    await state.clear()
+
+@dp.message(F.text == "🔍 Buscar objeto")
+async def search_item_start(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    if message.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring command from bot: user_id={user_id}")
+        return
+    logger.debug(f"🔍 Search started by user {user_id}: text='{message.text}'")
+    if user_data.get(user_id, {}).get('banned', False):
+        await message.answer("🚫 Estás bloqueado.")
+        return
+    await message.answer(
+        "🔎 Ingrese una palabra clave para la búsqueda (por ejemplo, 'silla') o omita:",
+        reply_markup=get_skip_keyboard()
+    )
+    await state.set_state(SearchForm.keyword)
+
+@dp.message(SearchForm.keyword, F.text == "⏭️ Omitir")
+async def skip_keyword(message: Message, state: FSMContext):
+    if message.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring command from bot: user_id={message.from_user.id}")
+        return
+    await state.update_data(keyword="")
+    await message.answer(
+        "📋 Seleccione una categoría para la búsqueda o omita:",
+        reply_markup=get_categories_keyboard(is_search=True)
+    )
+    await state.set_state(SearchForm.category)
+
+@dp.message(SearchForm.keyword)
+async def process_keyword(message: Message, state: FSMContext):
+    if message.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring command from bot: user_id={message.from_user.id}")
+        return
+    keyword = message.text.strip()
+    logger.debug(f"🔎 Search keyword: '{keyword}'")
+    await state.update_data(keyword=keyword)
+    await message.answer(
+        "📋 Seleccione una categoría para la búsqueda o omita:",
+        reply_markup=get_categories_keyboard(is_search=True)
+    )
+    await state.set_state(SearchForm.category)
+
+@dp.callback_query(F.data.startswith("search_category_"), SearchForm.category)
+async def process_search_category_callback(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring callback from bot: user_id={callback.from_user.id}")
+        await callback.answer()
+        return
+    category = callback.data.replace("search_category_", "")
+    logger.debug(f"📋 Search category selected: '{category}'")
+    valid_categories = [c.replace('📦 ', '').replace('🛋️ ', '').replace('📱 ', '').replace('👗 ', '').replace('👜 ', '').replace('📚 ', '').replace('🧸 ', '').replace('🔌 ', '').replace('🏀 ', '').replace('🌟 ', '') for c in categories] + ['Gratis']
+    if category not in valid_categories:
+        await callback.message.answer(
+            "❗ Error: categoría no encontrada.",
+            reply_markup=main_keyboard
+        )
+        await state.clear()
+        await callback.message.delete()
+        return
+    await state.update_data(category=category)
+    await callback.message.answer(
+        "🏙️ Seleccione una ciudad para la búsqueda o omita:",
+        reply_markup=get_cities_keyboard()
+    )
+    await state.set_state(SearchForm.city)
+    await callback.message.delete()
+    await callback.answer()
+
+@dp.callback_query(F.data == "search_skip_category", SearchForm.category)
+async def skip_category_callback(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring callback from bot: user_id={callback.from_user.id}")
+        await callback.answer()
+        return
+    await state.update_data(category="")
+    await callback.message.answer(
+        "🏙️ Seleccione una ciudad para la búsqueda o omitа:",
+        reply_markup=get_cities_keyboard()
+    )
+    await state.set_state(SearchForm.city)
+    await callback.message.delete()
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("search_city_"), SearchForm.city)
+async def process_search_city_callback(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring callback from bot: user_id={callback.from_user.id}")
+        await callback.answer()
+        return
+    city = callback.data.replace("search_city_", "")
+    logger.debug(f"📍 Search city selected: '{city}'")
+    if city not in cities:
+        await callback.message.answer(
+            "❗ Error: ciudad no encontrada.",
+            reply_markup=main_keyboard
+        )
+        await state.clear()
+        await callback.message.delete()
+        return
+    await state.update_data(city=city_mapping[city])
+    await perform_search(callback.message, state, chat_id=callback.message.chat.id)
+    await callback.message.delete()
+    await callback.answer()
+
+@dp.callback_query(F.data == "search_skip_city", SearchForm.city)
+async def skip_city_callback(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring callback from bot: user_id={callback.from_user.id}")
+        await callback.answer()
+        return
+    await state.update_data(city="")
+    await perform_search(callback.message, state, chat_id=callback.message.chat.id)
+    await callback.message.delete()
+    await callback.answer()
+
+async def perform_search(message: Message, state: FSMContext, chat_id: int):
+    data = await state.get_data()
+    keyword = data.get('keyword', "").lower()
+    category = data.get('category', "")
+    city = data.get('city', "")
+
+    logger.debug(f"🔍 Performing search: keyword='{keyword}', category='{category}', city='{city}'")
+
+    results = []
+    for listing_id, item in listings.items():
+        if item['expires_at'] > datetime.datetime.now():
+            logger.debug(f"🔎 Checking listing #{listing_id}: title='{item['title']}', description='{item.get('description', '')}'")
+            title_match = not keyword or keyword in item['title'].lower() or keyword in item.get('description', '').lower()
+            category_match = (
+                not category or
+                (category == 'Gratis' and item.get('is_free', False)) or
+                item['category'].replace('📦 ', '').replace('🛋️ ', '').replace('📱 ', '').replace('👗 ', '').replace('👜 ', '').replace('📚 ', '').replace('🧸 ', '').replace('🔌 ', '').replace('🏀 ', '').replace('🌟 ', '') == category
+            )
+            city_match = not city or item['city'] == city
+            if title_match and category_match and city_match:
+                logger.debug(f"✅ Listing #{listing_id} matches search criteria")
+                results.append(listing_id)
+            else:
+                logger.debug(f"❌ Listing #{listing_id} does not match: title_match={title_match}, category_match={category_match}, city_match={city_match}")
+
+    results.sort(key=lambda x: not listings[x].get('is_free', False))
+
+    logger.debug(f"🛒 Search results: {len(results)} items found")
+
+    if not results:
+        await message.answer("🔍 No se encontraron resultados. Intente modificar la búsqueda.", reply_markup=main_keyboard)
+        await state.clear()
+        return
+
+    await state.update_data(search_results=results, current_result_index=0)
+    await display_item_card(chat_id, results[0], caller_is_search=True, current_index=0, total_results=len(results))
+
+@dp.message(F.text == "📋 Mis anuncios")
+async def show_my_listings(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    if message.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring command from bot: user_id={user_id}")
+        return
+    if user_data.get(user_id, {}).get('banned', False):
+        await message.answer("🚫 Su cuenta está bloqueada.")
+        return
+    if user_id not in user_data or not user_data[user_id].get('listings'):
+        await message.answer("📭 No tienes anuncios activos.", reply_markup=main_keyboard)
+        return
+
+    active_listings = [lid for lid in user_data[user_id]['listings'] if listings.get(lid) and listings[lid]['expires_at'] > datetime.datetime.now()]
+    if not active_listings:
+        await message.answer("📭 No tienes anuncios activos.", reply_markup=main_keyboard)
+        return
+
+    keyboard_buttons = []
+    for listing_id in active_listings:
+        item = listings[listing_id]
+        button_text = f"🛒 #{item['id']} {'♾ ¡Gratis!' if item.get('is_free', False) else ''} {item['title']} (${item['price']})"
+        keyboard_buttons.append([
+            InlineKeyboardButton(text=button_text, callback_data=f"view_item_{listing_id}"),
+            InlineKeyboardButton(text="🗑", callback_data=f"delete_item_{listing_id}")
+        ])
+    keyboard_buttons.append([InlineKeyboardButton(text="❌ Cancelar", callback_data="cancel")])
+
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+    await message.answer("📋 Seleccione un anuncio para ver:", reply_markup=reply_markup)
+    await state.set_state(EditForm.select_item)
+
+@dp.callback_query(F.data == "back_to_search_results")
+async def back_to_search_results(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring callback from bot: user_id={callback.from_user.id}")
+        await callback.answer()
+        return
+    await callback.message.delete()
+    await display_search_results(callback.message, state)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("view_search_item_"))
+async def view_search_item_callback(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring callback from bot: user_id={callback.from_user.id}")
+        await callback.answer()
+        return
+    parts = callback.data.split("_")
+    listing_id = parts[3]
+    index = int(parts[4])
+    data = await state.get_data()
+    results = data.get('search_results', [])
+
+    if listing_id not in listings or listing_id not in results:
+        await callback.message.answer("❗ Anuncio no encontrado.", reply_markup=main_keyboard)
+        await state.clear()
+        await callback.message.delete()
+        return
+
+    await state.update_data(current_result_index=index)
+    await display_item_card(callback.message.chat.id, listing_id, caller_is_search=True, current_index=index, total_results=len(results))
+    await callback.message.delete()
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("search_prev_"))
+async def search_prev_callback(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring callback from bot: user_id={callback.from_user.id}")
+        await callback.answer()
+        return
+    current_index = int(callback.data.replace("search_prev_", ""))
+    data = await state.get_data()
+    results = data.get('search_results', [])
+
+    if current_index <= 0 or not results:
+        await callback.answer("⛔ Este es el primer anuncio.")
+        return
+
+    new_index = current_index - 1
+    await state.update_data(current_result_index=new_index)
+    await display_item_card(callback.message.chat.id, results[new_index], caller_is_search=True, current_index=new_index, total_results=len(results))
+    await callback.message.delete()
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("search_next_"))
+async def search_next_callback(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring callback from bot: user_id={callback.from_user.id}")
+        await callback.answer()
+        return
+    current_index = int(callback.data.replace("search_next_", ""))
+    data = await state.get_data()
+    results = data.get('search_results', [])
+
+    if current_index >= len(results) - 1 or not results:
+        await callback.answer("⛔ Este es el último anuncio.")
+        return
+
+    new_index = current_index + 1
+    await state.update_data(current_result_index=new_index)
+    await display_item_card(callback.message.chat.id, results[new_index], caller_is_search=True, current_index=new_index, total_results=len(results))
+    await callback.message.delete()
+    await callback.answer()
+
+@dp.callback_query(F.data == "show_more_results")
+async def show_more_results(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring callback from bot: user_id={callback.from_user.id}")
+        await callback.answer()
+        return
+    data = await state.get_data()
+    results = data.get('search_results', [])
+    current_page = data.get('search_page', 0)
+
+    next_page = current_page + 1
+    start_idx = next_page * 5
+    if start_idx >= len(results):
+        await callback.answer("⛔ No hay más resultados.")
+        return
+
+    keyboard_buttons = []
+    for idx, listing_id in enumerate(results[start_idx:start_idx+5]):
+        item = listings[listing_id]
+        button_text = f"🛒 #{item['id']} {'♾ ¡Gratis!' if item.get('is_free', False) else ''} {item['title']} (${item['price']})"
+        keyboard_buttons.append([InlineKeyboardButton(text=button_text, callback_data=f"view_search_item_{listing_id}_{start_idx+idx}")])
+    if start_idx + 5 < len(results):
+        keyboard_buttons.append([InlineKeyboardButton(text="➡️ Mostrar más", callback_data="show_more_results")])
+    if next_page > 0:
+        keyboard_buttons.append([InlineKeyboardButton(text="⬅️ Atrás", callback_data="show_prev_results")])
+    keyboard_buttons.append([InlineKeyboardButton(text="❌ Cancelar", callback_data="cancel")])
+
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+    await callback.message.edit_text(f"🛒 Anuncios encontrados: {len(results)}. Seleccione para ver:", reply_markup=reply_markup)
+    await state.update_data(search_page=next_page)
+    await callback.answer()
+
+@dp.callback_query(F.data == "show_prev_results")
+async def show_prev_results(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring callback from bot: user_id={callback.from_user.id}")
+        await callback.answer()
+        return
+    data = await state.get_data()
+    results = data.get('search_results', [])
+    current_page = data.get('search_page', 0)
+
+    prev_page = current_page - 1
+    if prev_page < 0:
+        await callback.answer("⛔ Esta es la primera página.")
+        return
+
+    start_idx = prev_page * 5
+    keyboard_buttons = []
+    for idx, listing_id in enumerate(results[start_idx:start_idx+5]):
+        item = listings[listing_id]
+        button_text = f"🛒 #{item['id']} {'♾ ¡Gratis!' if item.get('is_free', False) else ''} {item['title']} (${item['price']})"
+        keyboard_buttons.append([InlineKeyboardButton(text=button_text, callback_data=f"view_search_item_{listing_id}_{start_idx+idx}")])
+    if start_idx + 5 < len(results):
+        keyboard_buttons.append([InlineKeyboardButton(text="➡️ Mostrar más", callback_data="show_more_results")])
+    if prev_page > 0:
+        keyboard_buttons.append([InlineKeyboardButton(text="⬅️ Atrás", callback_data="show_prev_results")])
+    keyboard_buttons.append([InlineKeyboardButton(text="❌ Cancelar", callback_data="cancel")])
+
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+    await callback.message.edit_text(f"🛒 Anuncios encontrados: {len(results)}. Seleccione para ver:", reply_markup=reply_markup)
+    await state.update_data(search_page=prev_page)
+    await callback.answer()
+
+@dp.callback_query(F.data == "cancel")
+async def cancel_callback(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring callback from bot: user_id={callback.from_user.id}")
+        await callback.answer()
+        return
+    await callback.message.answer("✅ Acción cancelada.", reply_markup=main_keyboard)
+    await state.clear()
+    await callback.message.delete()
+
+@dp.callback_query(F.data.startswith("view_item_"))
+async def view_item_callback(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring callback from bot: user_id={callback.from_user.id}")
+        await callback.answer()
+        return
+    listing_id = callback.data.replace("view_item_", "")
+    user_id = callback.from_user.id
+    if listing_id not in listings or listings[listing_id]['user_id'] != user_id:
+        await callback.message.answer("❗ Anuncio no encontrado o no le pertenece.", reply_markup=main_keyboard)
+        await state.clear()
+        await callback.message.delete()
+        return
+
+    await state.update_data(selected_item_id=listing_id)
+    await display_item_card(callback.message.chat.id, listing_id, caller_is_edit=True)
+    await callback.message.delete()
+
+@dp.callback_query(F.data.startswith("edit_item_"))
+async def edit_item_callback(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring callback from bot: user_id={callback.from_user.id}")
+        await callback.answer()
+        return
+    listing_id = callback.data.replace("edit_item_", "")
+    user_id = callback.from_user.id
+    if listing_id not in listings or listings[listing_id]['user_id'] != user_id:
+        await callback.message.answer("❗ Anuncio no encontrado o no le pertenece.", reply_markup=main_keyboard)
+        await state.clear()
+        return
+
+    await state.update_data(selected_item_id=listing_id)
+    await callback.message.answer(
+        "✏️ Seleccione el campo para editar:",
+        reply_markup=get_edit_fields_keyboard()
+    )
+    await state.set_state(EditForm.choose_field)
+    await callback.message.delete()
+
+@dp.callback_query(F.data.startswith("delete_item_"))
+async def delete_item_callback(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring callback from bot: user_id={callback.from_user.id}")
+        await callback.answer()
+        return
+    listing_id = callback.data.replace("delete_item_", "")
+    user_id = callback.from_user.id
+    if listing_id not in listings or listings[listing_id]['user_id'] != user_id:
+        await callback.message.answer("❗ Anuncio no encontrado o no le pertenece.", reply_markup=main_keyboard)
+        await state.clear()
+        await callback.message.delete()
+        return
+
+    await state.update_data(selected_item_id=listing_id)
+    item = listings[listing_id]
+    await callback.message.answer(
+        f"⚠️ ¿Está seguro de que desea eliminar el anuncio #{item['id']} {'♾ ¡Gratis!' if item.get('is_free', False) else ''} {item['title']}?",
+        reply_markup=get_confirm_delete_keyboard(listing_id)
+    )
+    await callback.message.delete()
+
+@dp.callback_query(F.data.startswith("confirm_delete_"))
+async def confirm_delete_callback(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring callback from bot: user_id={callback.from_user.id}")
+        await callback.answer()
+        return
+    listing_id = callback.data.replace("confirm_delete_", "")
+    user_id = callback.from_user.id
+    if listing_id not in listings or listings[listing_id]['user_id'] != user_id:
+        await callback.message.answer("❗ Anuncio no encontrado o no le pertenece.", reply_markup=main_keyboard)
+        await state.clear()
+        await callback.message.delete()
+        return
+
+    item = listings.pop(listing_id)
+    user_data[user_id]['listings'].remove(listing_id)
+    await save_listings()
+    await save_user_data()
+
+    logger.info(f"✅ User {user_id} deleted item {listing_id}: {item['title']}")
+    await callback.message.answer(f"🗑 Anuncio #{item['id']} eliminado exitosamente.", reply_markup=main_keyboard)
+    await state.clear()
+    await callback.message.delete()
+
+@dp.message(EditForm.choose_field)
+async def process_choose_field(message: Message, state: FSMContext):
+    if message.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring command from bot: user_id={message.from_user.id}")
+        return
+    field = message.text.strip()
+    valid_fields = [
+        "📋 Categoría", "✏️ Título", "💰 Precio", "📸 Foto principal", "📷 Fotos adicionales",
+        "📝 Descripción", "🏙️ Ciudad", "📍 Geolocalización", "📞 Contacto", "📅 Vigencia"
+    ]
+    if field not in valid_fields:
+        await message.answer(
+            "❗ Por favor, seleccione un campo de los propuestos:",
+            reply_markup=get_edit_fields_keyboard()
+        )
+        return
+
+    data = await state.get_data()
+    listing_id = data.get('selected_item_id')
+    if not listing_id or listing_id not in listings:
+        await message.answer("❗ Error: anuncio no encontrado.", reply_markup=main_keyboard)
+        await state.clear()
+        return
+
+    if field == "📋 Categoría":
+        await message.answer(
+            "📋 Seleccione una nueva categoría:",
+            reply_markup=get_categories_keyboard()
+        )
+        await state.set_state(EditForm.edit_category)
+    elif field == "✏️ Título":
+        await message.answer(
+            "✏️ Ingrese un nuevo título (hasta 50 caracteres):",
+            reply_markup=cancel_keyboard
+        )
+        await state.set_state(EditForm.edit_title)
+    elif field == "💰 Precio":
+        await message.answer(
+            "💰 Indique un nuevo precio (en dólares) о 'Gratis':\nIngrese 0 para un anuncio gratuito o el monto (por ejemplo, 10.50).",
+            reply_markup=cancel_keyboard
+        )
+        await state.set_state(EditForm.edit_price_value)
+    elif field == "📸 Foto principal":
+        await message.answer(
+            "📸 Envíe una nueva foto principal:",
+            reply_markup=cancel_keyboard
+        )
+        await state.set_state(EditForm.edit_photo)
+    elif field == "📷 Fotos adicionales":
+        data = await state.get_data()
+        max_photos = 9 if listings[listing_id]['category'] == "📦 ¡Kit de mudanza!" else 3
+        await message.answer(
+            f"📷 Envíe hasta {max_photos} nuevas fotos adicionales o omitа:",
+            reply_markup=get_skip_keyboard()
+        )
+        await state.set_state(EditForm.edit_additional_photos)
+    elif field == "📝 Descripción":
+        await message.answer(
+            "📝 Ingrese una nueva descripción (hasta 200 caracteres, opcional):",
+            reply_markup=get_skip_keyboard()
+        )
+        await state.set_state(EditForm.edit_description)
+    elif field == "🏙️ Ciudad":
+        await message.answer(
+            "🏙️ Seleccione una nueva ciudad:",
+            reply_markup=get_cities_keyboard()
+        )
+        await state.set_state(EditForm.edit_city)
+    elif field == "📍 Geolocalización":
+        await message.answer(
+            "📍 Indique una nueva ubicación:",
+            reply_markup=get_location_type_keyboard()
+        )
+        await state.set_state(EditForm.edit_location_type)
+    elif field == "📞 Contacto":
+        await message.answer(
+            "📞 Ingrese una nueva información de contacto (por ejemplo, número de teléfono):",
+            reply_markup=cancel_keyboard
+        )
+        await state.set_state(EditForm.edit_contact)
+    elif field == "📅 Vigencia":
+        await message.answer(
+            "📅 Indique un nuevo período de validez del anuncio:",
+            reply_markup=get_expires_at_keyboard()
+        )
+        await state.set_state(EditForm.edit_expires_at)
+
+@dp.message(EditForm.edit_category)
+async def process_edit_category(message: Message, state: FSMContext):
+    if message.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring command from bot: user_id={message.from_user.id}")
+        return
+    category = message.text.strip()
+    if category not in categories:
+        await message.answer(
+            "❗ Por favor, seleccione una categoría de las propuestas:",
+            reply_markup=get_categories_keyboard()
+        )
+        return
+    data = await state.get_data()
+    listing_id = data.get('selected_item_id')
+
+    listings[listing_id]['category'] = category
+    await save_listings()
+
+    logger.info(f"✅ User {message.from_user.id} edited category of item {listing_id} to '{category}'")
+    await display_item_card(message.from_user.id, listing_id, caller_is_edit=True)
+    await state.clear()
+
+@dp.message(EditForm.edit_title)
+async def process_edit_title(message: Message, state: FSMContext):
+    if message.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring command from bot: user_id={message.from_user.id}")
+        return
+    title = message.text.strip()
+    if len(title) > 50:
+        await message.answer(
+            "❗ El título es demasiado largo. Ingrese hasta 50 caracteres:",
+            reply_markup=cancel_keyboard
+        )
+        return
+    data = await state.get_data()
+    listing_id = data.get('selected_item_id')
+
+    listings[listing_id]['title'] = title
+    await save_listings()
+
+    logger.info(f"✅ User {message.from_user.id} edited title of item {listing_id} to '{title}'")
+    await display_item_card(message.from_user.id, listing_id, caller_is_edit=True)
+    await state.clear()
+
+@dp.message(EditForm.edit_description, F.text == "⏭️ Omitir")
+async def skip_edit_description(message: Message, state: FSMContext):
+    if message.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring command from bot: user_id={message.from_user.id}")
+        return
+    data = await state.get_data()
+    listing_id = data.get('selected_item_id')
+
+    listings[listing_id]['description'] = ""
+    await save_listings()
+
+    logger.info(f"✅ User {message.from_user.id} cleared description of item {listing_id}")
+    await display_item_card(message.from_user.id, listing_id, caller_is_edit=True)
+    await state.clear()
+
+@dp.message(EditForm.edit_description)
+async def process_edit_description(message: Message, state: FSMContext):
+    if message.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring command from bot: user_id={message.from_user.id}")
+        return
+    description = message.text.strip()
+    if len(description) > 200:
+        await message.answer(
+            "❗ La descripción es demasiado larga. Ingrese hasta 200 caracteres o omitа:",
+            reply_markup=get_skip_keyboard()
+        )
+        return
+    data = await state.get_data()
+    listing_id = data.get('selected_item_id')
+
+    listings[listing_id]['description'] = description
+    await save_listings()
+
+    logger.info(f"✅ User {message.from_user.id} edited description of item {listing_id}")
+    await display_item_card(message.from_user.id, listing_id, caller_is_edit=True)
+    await state.clear()
+
+@dp.message(EditForm.edit_photo, F.photo)
+async def process_edit_photo(message: Message, state: FSMContext):
+    if message.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring command from bot: user_id={message.from_user.id}")
+        return
+    photo_id = message.photo[-1].file_id
+    data = await state.get_data()
+    listing_id = data.get('selected_item_id')
+
+    listings[listing_id]['photo_id'] = photo_id
+    await save_listings()
+
+    logger.info(f"✅ User {message.from_user.id} edited photo of item {listing_id}")
+    await display_item_card(message.from_user.id, listing_id, caller_is_edit=True)
+    await state.clear()
+
+@dp.message(EditForm.edit_additional_photos, F.text == "⏭️ Omitir")
+async def skip_edit_additional_photos(message: Message, state: FSMContext):
+    if message.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring command from bot: user_id={message.from_user.id}")
+        return
+    data = await state.get_data()
+    listing_id = data.get('selected_item_id')
+
+    listings[listing_id]['additional_photo_ids'] = []
+    await save_listings()
+
+    logger.info(f"✅ User {message.from_user.id} cleared additional photos of item {listing_id}")
+    await display_item_card(message.from_user.id, listing_id, caller_is_edit=True)
+    await state.clear()
+
+@dp.message(EditForm.edit_additional_photos, F.photo)
+async def process_edit_additional_photos(message: Message, state: FSMContext):
+    if message.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring command from bot: user_id={message.from_user.id}")
+        return
+    data = await state.get_data()
+    listing_id = data.get('selected_item_id')
+    max_photos = 9 if listings[listing_id]['category'] == "📦 ¡Kit de mudanza!" else 3
+    additional_photos = data.get('edit_additional_photo_ids', [])
+
+    if len(additional_photos) >= max_photos:
+        await message.answer(
+            f"📷 Se alcanzó el máximo ({max_photos} fotos adicionales). Presione '⏭️ Omitir'.",
+            reply_markup=get_skip_keyboard()
+        )
+        return
+
+    additional_photos.append(message.photo[-1].file_id)
+    await state.update_data(edit_additional_photo_ids=additional_photos)
+    await message.answer(
+        f"✅ Foto agregada ({len(additional_photos)}/{max_photos}). Agregue más о omitа:",
+        reply_markup=get_skip_keyboard()
+    )
+
+@dp.message(EditForm.edit_price_value)
+async def process_edit_price_value(message: Message, state: FSMContext):
+    if message.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring command from bot: user_id={message.from_user.id}")
+        return
+    price_text = message.text.strip().lower()
+    data = await state.get_data()
+    listing_id = data.get('selected_item_id')
+
+    if price_text == "gratis":
+        listings[listing_id]['price'] = "Gratis"
+        listings[listing_id]['status'] = "free"
+        listings[listing_id]['is_free'] = True
+        await save_listings()
+        logger.info(f"✅ User {message.from_user.id} edited price of item {listing_id} to 'Gratis'")
+        await display_item_card(message.from_user.id, listing_id, caller_is_edit=True)
+        await state.clear()
+        return
+
+    try:
+        price = float(price_text)
+        if price < 0:
+            raise ValueError
+        if price == 0:
+            listings[listing_id]['price'] = "Gratis"
+            listings[listing_id]['status'] = "free"
+            listings[listing_id]['is_free'] = True
+        else:
+            listings[listing_id]['price'] = f"{price:.2f}"
+            listings[listing_id]['status'] = "sell"
+            listings[listing_id]['is_free'] = False
+        await save_listings()
+        logger.info(f"✅ User {message.from_user.id} edited price of item {listing_id} to '{listings[listing_id]['price']}'")
+        await display_item_card(message.from_user.id, listing_id, caller_is_edit=True)
+        await state.clear()
+    except ValueError:
+        await message.answer(
+            "❗ Ingrese un precio válido (número ≥ 0, por ejemplo, 10.50) о 'Gratis'.",
+            reply_markup=cancel_keyboard
+        )
+
+@dp.message(EditForm.edit_location_type, F.text == "🏙️ Solo ciudad")
+async def process_edit_location_city_only(message: Message, state: FSMContext):
+    await state.update_data(edit_location_type="city")
+    await message.answer(
+        "🏙️ Seleccione una nueva ciudad:",
+        reply_markup=get_cities_keyboard()
+    )
+    await state.set_state(EditForm.edit_city)
+
+@dp.message(EditForm.edit_location_type, F.location)
+async def process_edit_location_geolocation(message: Message, state: FSMContext):
+    if message.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring command from bot: user_id={message.from_user.id}")
+        return
+    data = await state.get_data()
+    listing_id = data.get('selected_item_id')
+
+    listings[listing_id]['location_type'] = "geolocation"
+    listings[listing_id]['latitude'] = message.location.latitude
+    listings[listing_id]['longitude'] = message.location.longitude
+    await save_listings()
+
+    logger.info(f"✅ User {message.from_user.id} edited geolocation of item {listing_id}")
+    await display_item_card(message.from_user.id, listing_id, caller_is_edit=True)
+    await state.clear()
+
+@dp.message(EditForm.edit_city)
+async def process_edit_city(message: Message, state: FSMContext):
+    if message.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring command from bot: user_id={message.from_user.id}")
+        return
+    city = message.text.strip()
+    if city not in cities:
+        await message.answer(
+            "❗ Por favor, seleccione una ciudad de las propuestas:",
+            reply_markup=get_cities_keyboard()
+        )
+        return
+    data = await state.get_data()
+    listing_id = data.get('selected_item_id')
+
+    listings[listing_id]['city'] = city_mapping[city]
+    listings[listing_id]['location_type'] = "city"
+    listings[listing_id]['latitude'] = None
+    listings[listing_id]['longitude'] = None
+    await save_listings()
+
+    logger.info(f"✅ User {message.from_user.id} edited city of item {listing_id} to '{city_mapping[city]}'")
+    await display_item_card(message.from_user.id, listing_id, caller_is_edit=True)
+    await state.clear()
+
+@dp.message(EditForm.edit_contact)
+async def process_edit_contact(message: Message, state: FSMContext):
+    if message.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring command from bot: user_id={message.from_user.id}")
+        return
+    contact = message.text.strip()
+    if not contact:
+        await message.answer(
+            "❗ La información de contacto no puede estar vacía. Ingrese, por ejemplo, un número de teléfono:",
+            reply_markup=cancel_keyboard
+        )
+        return
+    data = await state.get_data()
+    listing_id = data.get('selected_item_id')
+
+    listings[listing_id]['contact'] = contact
+    await save_listings()
+
+    logger.info(f"✅ User {message.from_user.id} edited contact of item {listing_id}")
+    await display_item_card(message.from_user.id, listing_id, caller_is_edit=True)
+    await state.clear()
+
+@dp.message(EditForm.edit_expires_at)
+async def process_edit_expires_at(message: Message, state: FSMContext):
+    if message.from_user.is_bot:
+        logger.warning(f"⚠️ Ignoring command from bot: user_id={message.from_user.id}")
+        return
+    try:
+        days = int(message.text.replace("📅 ", "").replace(" días", "").replace(" día", ""))
+        if days not in [3, 5]:
+            raise ValueError
+    except ValueError:
+        await message.answer(
+            "❗ Por favor, seleccione '📅 3 días' о '📅 5 días'.",
             reply_markup=get_expires_at_keyboard()
         )
         return
 
     data = await state.get_data()
     listing_id = data.get('selected_item_id')
+    expires_at = datetime.datetime.now() + datetime.timedelta(days=days)
 
-    if days == 0:
-        listings[listing_id]['expires_at'] = None # Удаляем срок действия
-    else:
-        expires_at = datetime.datetime.now() + datetime.timedelta(days=days)
-        listings[listing_id]['expires_at'] = expires_at
-
+    listings[listing_id]['expires_at'] = expires_at
     await save_listings()
 
-    logger.info(f"✅ Usuario {message.from_user.id} editó la vigencia del artículo {listing_id}.")
+    logger.info(f"✅ User {message.from_user.id} edited expiration of item {listing_id} to {expires_at}")
     await display_item_card(message.from_user.id, listing_id, caller_is_edit=True)
     await state.clear()
-
-
-@dp.message(Form.set_duration)
-async def process_set_duration_invalid(message: Message):
-    await message.answer(
-        "❗ Por favor, seleccione '📅 3 días', '📅 5 días' o '🗓️ Sin fecha de caducidad'.",
-        reply_markup=get_expires_at_keyboard()
-    )
-
-
-# ------------------------------ Admin Panel ------------------------------
-
-@dp.message(F.text == "📊 Admin Panel")
-async def show_admin_panel(message: Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("❗ No tienes permiso para acceder al panel de administración.")
-        logger.warning(f"⚠️ Intento de acceso no autorizado al panel de administración por el usuario {message.from_user.id}.")
-        return
-    
-    await state.clear()
-    
-    total_users = len(users_data)
-    total_listings = len(listings)
-    active_listings = sum(1 for li in listings.values() if li.get('status') == 'active')
-
-    message_text = (
-        "📊 Panel de Administración\n\n"
-        f"Total de usuarios: {total_users}\n"
-        f"Total de anuncios: {total_listings}\n"
-        f"Anuncios activos: {active_listings}\n\n"
-        "Seleccione una acción:"
-    )
-
-    admin_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👥 Ver Usuarios", callback_data="admin_view_users")],
-        [InlineKeyboardButton(text="📄 Ver Todos los Anuncios", callback_data="admin_view_all_listings")],
-        [InlineKeyboardButton(text="⬅️ Menú Principal", callback_data="back_to_main")]
-    ])
-    await message.answer(message_text, reply_markup=admin_keyboard)
-    logger.info(f"➡️ Usuario {message.from_user.id} accedió al Panel de Administración.")
-
-@dp.callback_query(F.data == "back_to_admin_panel")
-async def back_to_admin_panel_callback(callback_query: CallbackQuery, state: FSMContext):
-    await callback_query.answer()
-    await show_admin_panel(callback_query.message, state)
-
-
-@dp.callback_query(F.data == "admin_view_users")
-async def admin_view_users(callback_query: CallbackQuery):
-    if callback_query.from_user.id != ADMIN_ID:
-        await callback_query.answer("❗ No tienes permiso.", show_alert=True)
-        return
-    await callback_query.answer()
-
-    if not users_data:
-        await callback_query.message.edit_text("No hay usuarios registrados aún.")
-        return
-
-    message_text = "👥 Usuarios Registrados:\n\n"
-    for user_id, info in users_data.items():
-        username = info.get('username', 'N/A')
-        full_name = info.get('full_name', 'N/A')
-        first_access = info.get('first_access', 'N/A')
-        message_text += (
-            f"ID: <code>{user_id}</code>\n"
-            f"Nombre: {escape(full_name)}\n"
-            f"Usuario: @{escape(username) if username else 'N/A'}\n"
-            f"Primer acceso: {first_access}\n\n"
-        )
-    
-    await callback_query.message.edit_text(message_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Volver al Panel Admin", callback_data="back_to_admin_panel")]
-    ]))
-    logger.info(f"➡️ Admin {callback_query.from_user.id} vio la lista de usuarios.")
-
-@dp.callback_query(F.data == "admin_view_all_listings")
-async def admin_view_all_listings(callback_query: CallbackQuery):
-    if callback_query.from_user.id != ADMIN_ID:
-        await callback_query.answer("❗ No tienes permiso.", show_alert=True)
-        return
-    await callback_query.answer()
-
-    if not listings:
-        await callback_query.message.edit_text("No hay anuncios publicados aún.")
-        return
-
-    message_text = "📄 Todos los Anuncios:\n\n"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
-
-    sorted_listings = sorted(listings.items(), key=lambda item: item[1].get('published_at', ''), reverse=True)
-
-    for listing_id, info in sorted_listings:
-        title = escape(info.get('title', 'N/A'))
-        status_icon = "🟢" if info.get('status') == 'active' else "🔴" 
-        message_text += f"{status_icon} Anuncio #{listing_id}: {title} (Usuario: {info.get('user_id')})\n"
-        keyboard.inline_keyboard.append([
-            InlineKeyboardButton(text=f"Ver Anuncio #{listing_id}", callback_data=f"admin_view_listing:{listing_id}")
-        ])
-    
-    keyboard.inline_keyboard.append([InlineKeyboardButton(text="⬅️ Volver al Panel Admin", callback_data="back_to_admin_panel")])
-
-    await callback_query.message.edit_text(message_text, reply_markup=keyboard)
-    logger.info(f"➡️ Admin {callback_query.from_user.id} vio todos los anuncios.")
-
-
-@dp.callback_query(F.data.startswith("admin_view_listing:"))
-async def admin_view_listing_details(callback_query: CallbackQuery):
-    if callback_query.from_user.id != ADMIN_ID:
-        await callback_query.answer("❗ No tienes permiso.", show_alert=True)
-        return
-    await callback_query.answer()
-    listing_id = callback_query.data.split(":")[1]
-    await display_item_card(callback_query.from_user.id, listing_id, is_admin_view=True)
-    logger.info(f"➡️ Admin {callback_query.from_user.id} viendo detalles de anuncio {listing_id}.")
-
-
-# ------------------------------ Navegación general ------------------------------
-
-@dp.callback_query(F.data == "back_to_main")
-async def back_to_main_menu(callback_query: CallbackQuery, state: FSMContext):
-    await callback_query.answer()
-    await state.clear()
-    await callback_query.message.edit_text(
-        "Volviendo al menú principal.",
-        reply_markup=main_keyboard if callback_query.from_user.id != ADMIN_ID else get_main_keyboard_admin()
-    )
-    logger.info(f"➡️ Usuario {callback_query.from_user.id} volvió al menú principal.")
-
-
-@dp.message(F.text == "⚙️ Configuración")
-async def show_settings(message: Message):
-    await message.answer("🛠️ Opciones de configuración (funcionalidad no implementada): \n- Idioma \n- Notificaciones",
-                         reply_markup=main_keyboard if message.from_user.id != ADMIN_ID else get_main_keyboard_admin())
-    logger.info(f"➡️ Usuario {message.from_user.id} vio las opciones de configuración.")
-
 
 @dp.message()
 async def handle_unprocessed(message: Message, state: FSMContext):
     if message.from_user.is_bot:
-        logger.warning(f"⚠️ Ignorando mensaje no procesado de bot: user_id={message.from_user.id}")
+        logger.warning(f"⚠️ Ignoring unprocessed message from bot: user_id={message.from_user.id}")
         return
-    logger.warning(f"⚠️ Mensaje no procesado del usuario {message.from_user.id}: '{message.text}'")
-    current_state = await state.get_state()
-    if current_state is None:
-        await message.answer("❗ Acción no reconocida. Seleccione una opción del menú:", 
-                             reply_markup=main_keyboard if message.from_user.id != ADMIN_ID else get_main_keyboard_admin())
-    else:
-        await message.answer(f"❗ Acción no reconocida. Por favor, continúe con el proceso actual o use /cancel para reiniciar.")
+    logger.warning(f"⚠️ Unprocessed message from user {message.from_user.id}")
+    await message.answer("❗ Comando no reconocido. Use el menú principal.", reply_markup=main_keyboard)
 
+async def main():
+    await load_user_data()
+    await load_listings()
+    await dp.start_polling(bot)
 
-# --- ДОБАВЛЕНО/ИЗМЕНЕНО ДЛЯ ВЕБХУКОВ С AIOHTTP ---
-async def on_startup_webhook(dispatcher: Dispatcher, bot: Bot):
-    logger.info("🚀 Bot is starting with webhooks (aiohttp)...")
-    print(f"WEBHOOK_URL: {WEBHOOK_URL}")
-    print(f"WEBAPP_HOST: {WEBAPP_HOST}")
-    print(f"WEBAPP_PORT: {WEBAPP_PORT}")
-    # Удаляем старый вебхук на всякий случай
-    await bot.delete_webhook(drop_pending_updates=True)
-    # Установка нового вебхука
-    await bot.set_webhook(WEBHOOK_URL, secret_token=WEBHOOK_SECRET) # <-- ЭТА СТРОКА ИЗМЕНЕНА
-    logger.info("✅ Webhook set successfully.")
-    if ADMIN_ID:
-        try:
-            await bot.send_message(ADMIN_ID, "✅ Бот успешно запущен и готов к работе!")
-        except Exception as e:
-            logger.error(f"❌ Не удалось отправить сообщение администратору о запуске: {e}")
-
-async def on_shutdown_webhook(dispatcher: Dispatcher, bot: Bot):
-    logger.info("🔴 Bot is shutting down, deleting webhook...")
-    await bot.delete_webhook()
-    logger.info("🗑️ Webhook deleted.")
-    if ADMIN_ID:
-        try:
-            await bot.send_message(ADMIN_ID, "🔴 Бот остановлен.")
-        except Exception as e:
-            logger.error(f"❌ Не удалось отправить сообщение администратору об остановке: {e}")
-
-
-# Функция main теперь не асинхронная, так как web.run_app() блокирующая
-def main():
-    logger.info("🚀 Iniciando la función principal...")
-    # Загружаем данные при старте (нужно сделать их синхронными или вызвать asyncio.run внутри)
-    # Так как load_user_data и load_listings асинхронные, их нужно выполнить до запуска веб-сервера
-    asyncio.run(load_user_data())
-    asyncio.run(load_listings())
-
-    # Создаем веб-приложение aiohttp
-    app = web.Application()
-
-    # Регистрируем обработчик вебхуков
-    webhook_requests_handler = SimpleRequestHandler(
-        dispatcher=dp,
-        bot=bot,
-        secret_token=WEBHOOK_SECRET # <-- ЭТА СТРОКА ИЗМЕНЕНА
-    )
-    # Путь для вебхука должен быть уникальным и содержать токен для безопасности
-    webhook_requests_handler.register(app, path=f"/webhook/{WEBHOOK_SECRET}") # <-- ЭТА СТРОКА ИЗМЕНЕНА
-
-    # Устанавливаем функции on_startup и on_shutdown для aiohttp приложения
-    app.on_startup.append(lambda app: on_startup_webhook(dp, bot))
-    app.on_shutdown.append(lambda app: on_shutdown_webhook(dp, bot))
-
-    # Запускаем веб-приложение
-    logger.info(f"🚀 Запускаем веб-сервер на {WEBAPP_HOST}:{WEBAPP_PORT}")
-    web.run_app(app, host=WEBAPP_HOST, port=WEBAPP_PORT)
-
-
-if __name__ == '__main__':
-    main() # main() теперь синхронная
+if __name__ == "__main__":
+    asyncio.run(main())

@@ -1,0 +1,25 @@
+﻿# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Environment variables
+.env
+
+# Data files
+user_data.json
+listings.json
+
+# Logs
+*.log
+
+# IDE
+.idea/
+.vscode/
